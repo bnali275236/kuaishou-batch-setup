@@ -1,0 +1,52 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+build/
+*.tsbuildinfo
+
+# runtime data (SQLite / logs / exports) — 本地事实源，绝不入库
+.data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+logs/
+exports/
+
+# secrets — 凭证文件绝不能提交
+.env
+.env.local
+.env.*.local
+*.key
+secrets/
+
+# editor / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# logs
+npm-debug.log*
+yarn-error.log*
+*.log
+
+# === 以下为补充：临时文件 / 产物 / 密钥，绝不入库 ===
+
+# 临时与调试产物
+.tmp-*/
+.tmp-launch-*.txt
+*.zip
+broken-*.txt
+vite.config.ts.timestamp-*.mjs
+apps/electron/scripts/.fix-tmp/
+
+# electron-builder 输出与打包 staging（stage.js 全量重建）
+release/
+apps/electron/resources/server/
+apps/electron/resources/web/
+
+# 工作台工具临时目录
+.workbuddy/tmp/

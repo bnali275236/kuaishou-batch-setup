@@ -1,0 +1,387 @@
+// 快手广告工作台 —— 本地数据模型
+// 设计原则：本地库是唯一事实源，所有外部 ID 一律以 String 存储
+// （广告主 ID / 计划 ID 数值可能超出 32 位，用 String 规避 BigInt 序列化问题）
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// 开发者应用配置（单行表，id 恒为 1）
+/// secret 用 AES-256-GCM 加密后落库，明文永不落盘、永不出后端
+model AppConfig {
+  id          Int      @id @default(1)
+  appId       String
+  secretEnc   String
+  redirectUri String
+  /// JSON 字符串数组，本项目固定为 ["report_service","ad_query","ad_manage"]
+  scopes      String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+/// 局域网共享配置（单行表，id 恒为 1）。
+///
+/// 背景：token 是按「应用 + 快手账号」签发的，本来与设备无关；但官方
+/// refresh_token 是**轮换制**（每次刷新生成新 token、老的立即失效），
+/// 所以「把授权复制到多台设备各自使用」会互相踢下线。
+/// 唯一干净的共享方式是把后端跑在一台主机上、其他设备用浏览器访问：
+/// token 只有一个进程持有、只刷新一次，天然不会冲突。
+///
+/// 代价：端口一旦开在局域网，同网段任何人都能调 /api/manage/*（改出价、
+/// 改预算）与 /api/plan/tasks（真实建计划）—— 所以开启共享**必须**同时
+/// 设置访问口令，由 AccessGuard 强制校验。
+model ShareConfig {
+  id Int @id @default(1)
+  /// 是否允许非本机设备访问（false = 只监听 127.0.0.1）
+  enabled Boolean @default(false)
+  /// 访问口令：格式 `<saltHex>:<scryptHex>`。用 scrypt 而非明文，
+  /// 避免配置文件被拷走后口令直接泄露。
+  passwordHash String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// 授权凭证 —— 一次授权 = 一份凭证，token 属于凭证，不属于账户。
+///
+/// 两个**正交**的维度，必须分开记：
+///
+///   authEntry 授权入口（决定域名，即跳到哪个平台）
+///     LUOPAN      磁力罗盘  developers.e.kuaishou.com/tools/authorize
+///                 → 支持批量，可用罗盘账号一次授权全部账户
+///     ADVERTISER  磁力智投  ad.e.kuaishou.com/openapi/oauth (oauth_type=advertiser)
+///                 → 仅覆盖该广告主体下的投放账户
+///     AGENT       代理商    ad.e.kuaishou.com/openapi/oauth (oauth_type=agent)
+///                 → 1 个 token 覆盖管辖范围内全部广告主账户
+///
+///   authType 授权方式（决定覆盖几个账户，在快手授权页上勾选）
+///     USER    「基于用户授权」      生效范围 = 该快手ID（磁力罗盘/代理商）下的全部广告账户
+///     ACCOUNT 「基于快手广告账户授权」生效范围 = 勾选的一个或多个广告账户
+///
+/// 一次授权可能覆盖 N 个账户。凭证必须独立建表，否则
+/// N 个账户行会各存一份完全相同的 token 密文 —— 既浪费又会造成
+/// 「同一份 token 被刷新 N 次 / 部分账户拿旧 token」的一致性灾难。
+model AuthGrant {
+  id                    Int      @id @default(autoincrement())
+  /// 展示用标签，例如「罗盘授权 · 09/24」
+  label                 String?
+  /// 授权入口：LUOPAN | ADVERTISER | AGENT
+  authEntry             String   @default("LUOPAN")
+  /// 授权方式：USER | ACCOUNT
+  authType              String   @default("ACCOUNT")
+  /// 用户在生成授权链接时声明的方式（经 state 回传），用于校正 authType
+  declaredAuthType      String?
+  /// USER 模式下的授权主体快手ID；ACCOUNT 模式下为空
+  subjectId             String?
+  subjectName           String?
+  /// 本次授权申请到的权限范围（JSON 数组）
+  scopesJson            String
+  accessTokenEnc        String
+  refreshTokenEnc       String
+  accessTokenExpiresAt  DateTime
+  refreshTokenExpiresAt DateTime
+  /// ACTIVE | REFRESHING | NEED_REAUTH | DISABLED
+  status                String   @default("ACTIVE")
+  lastError             String?
+  /// 最近一次与平台对齐账户列表的时间
+  lastSyncedAt          DateTime?
+  /// 最近一次对齐到的账户数
+  accountCount          Int      @default(0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  accounts OauthAccount[]
+
+  @@index([status])
+  @@index([authEntry])
+}
+
+/// 广告账户。**不持有 token** —— 一律通过所属 AuthGrant 取用
+model OauthAccount {
+  id            Int       @id @default(autoincrement())
+  advertiserId  String    @unique
+  accountName   String?
+  grantId       Int
+  grant         AuthGrant @relation(fields: [grantId], references: [id], onDelete: Cascade)
+  /// 账户维度开关：ACTIVE | DISABLED
+  status        String    @default("ACTIVE")
+  /// 代投白名单：true = 仅可看数据（报表/盯盘），禁止上计划、调预算、调整计划等写操作
+  readOnly      Boolean   @default(false)
+  /// 白名单能力快照（JSON），用于前端动态裁剪可用功能
+  whiteListJson String?
+  lastSyncAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([grantId])
+  @@index([status])
+}
+
+/// 全量调用审计：每一次对开放平台的调用都留痕
+model AuditLog {
+  id           Int      @id @default(autoincrement())
+  actor        String   @default("system")
+  action       String
+  advertiserId String?
+  path         String?
+  requestJson  String?
+  ok           Boolean  @default(true)
+  code         Int?
+  message      String?
+  /// 错误分类：RETRYABLE / PARAM / PERMISSION / TOKEN_INVALID / UNKNOWN
+  kind         String?
+  attempt      Int      @default(1)
+  durationMs   Int?
+  createdAt    DateTime @default(now())
+
+  @@index([advertiserId, createdAt])
+  @@index([createdAt])
+}
+
+/// 报表增量拉取水位线，避免重复拉全量
+model SyncWatermark {
+  id           Int      @id @default(autoincrement())
+  advertiserId String
+  /// account | campaign | unit | creative | material
+  reportType   String
+  lastSyncAt   DateTime
+  updatedAt    DateTime @updatedAt
+
+  @@unique([advertiserId, reportType])
+}
+
+// ------------------------------------------------------------------
+// 上计划（批量创编）
+//
+// 为什么必须自己建任务表：
+// 计划层和广告组层**没有批量创建接口**，创意层也只有 batch_update。
+// 所以「批量创建 100 条」= 本地循环调用 300 次接口（计划+组+创意各一次），
+// 按 600 QPM 限流算要跑十几分钟。这中间必须能中断、能续跑、能只重试失败项，
+// 否则用户刷新页面或程序崩溃就前功尽弃。这是任务状态机存在的唯一理由。
+// ------------------------------------------------------------------
+
+/// 创编草稿：表格数据先落库，避免用户填了一百行结果浏览器崩了
+model PlanDraft {
+  id           Int      @id @default(autoincrement())
+  name         String
+  /// 营销目标 campaign.type，决定表格列
+  campaignType Int      @default(2)
+  /// PlanRow[] 的 JSON
+  rowsJson     String
+  /// 策略组：PlanCardMode CardForm 的完整 JSON 快照（可空 = 旧草稿只有行数据）
+  formJson     String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+/// 批量任务
+model BatchTask {
+  id         Int      @id @default(autoincrement())
+  name       String
+  /// PENDING | RUNNING | PAUSED | DONE | PARTIAL | FAILED | CANCELLED
+  status     String   @default("PENDING")
+  /// 创建任务时的源草稿（可空，支持不存草稿直接提交）
+  draftId    Int?
+  /// 是否只校验不提交
+  dryRun     Boolean  @default(false)
+  /// 创建后置状态：PAUSED（默认）| RUNNING。
+  /// 组层创建时直接下发 put_status；计划层与创意层的创建接口没有状态字段，
+  /// 因此由任务收尾阶段批量补一次状态更新（失败不阻塞，因为组已暂停即无消耗）。
+  initialStatus String @default("PAUSED")
+  totalItems Int      @default(0)
+  succeeded  Int      @default(0)
+  failed     Int      @default(0)
+  skipped    Int      @default(0)
+  lastError  String?
+  /// PlanRow[] 的 JSON 快照（创建任务时落库，供「复制」重新发起）
+  rowsJson   String?
+  /// 仅删除显示：隐藏后不再出现在历史任务列表（平台实体不受影响）
+  hidden     Boolean  @default(false)
+  startedAt  DateTime?
+  finishedAt DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  items BatchTaskItem[]
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+/// 任务条目：一个条目 = 一次平台调用（一个计划 / 一个组 / 一个创意）
+model BatchTaskItem {
+  id         Int    @id @default(autoincrement())
+  taskId     Int
+  /// 全局执行顺序，决定「计划→组→创意」的执行次序
+  seq        Int
+  advertiserId String
+  /// CAMPAIGN | UNIT | CREATIVE
+  level      String
+  /// 同一行内的父级条目（组依赖计划、创意依赖组），用于回填平台 ID
+  parentId   Int?
+  /// 原始行号，便于把失败定位回表格
+  rowNo      Int    @default(0)
+  /// 提交给平台的完整请求体 JSON（已做单位换算，可直接复现）
+  payloadJson String
+  /// 展示名（计划名/组名/创意名），用于列表核对
+  displayName String?
+  /// PENDING | RUNNING | SUCCEEDED | FAILED | SKIPPED
+  status     String @default("PENDING")
+  /// 平台返回的实体 ID（campaign_id / unit_id / creative_id）
+  platformId String?
+  /// 幂等键：同任务内相同内容只提交一次，重试时用于跳过已成功项
+  idemKey    String
+  attempts   Int    @default(0)
+  errorCode  Int?
+  errorKind  String?
+  errorMessage String?
+  /// NONE | PENDING | OK | MISMATCH | NOT_FOUND
+  verifyStatus String @default("NONE")
+  verifyDiff   String?
+  verifiedAt   DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  task BatchTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, idemKey])
+  @@index([taskId, status])
+  @@index([advertiserId])
+  @@index([verifyStatus])
+}
+
+/// 定向包 —— 对齐创量模式：先在包库里把定向配好存起来，上计划时直接选择。
+/// 定向参数以 targeting JSON 原样存储（与 PlanRow.targeting 同构），
+/// 应用时整体展开进行级 targeting，提交时仍走 mapper 白名单过滤。
+model TargetPackage {
+  id            Int      @id @default(autoincrement())
+  name          String
+  /// 备注（适用目标/说明）
+  note          String?
+  /// targeting 白名单 JSON 对象（region / ages_range / platform_os / population …）
+  targetingJson String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+/// 文案包：可复用的文案批次资产（对齐定向包模式：先建包、上计划时选择）
+model CopyPackage {
+  id         Int      @id @default(autoincrement())
+  name       String
+  /// 备注
+  note       String?
+  /// 文案数组 JSON（每条 ≤30 字，按视频顺序轮转分配）
+  titlesJson String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+/// 监测链接包：命名的第三方监测链接组合（点击监测 + 展示监测），
+/// 上计划时按包选择，多账户多次创编可复用不同包
+model MonitorPackage {
+  id            Int      @id @default(autoincrement())
+  name          String
+  /// 备注（适用渠道/说明）
+  note          String?
+  /// 第三方点击监测链接（创意层 click_track_url）
+  clickUrl      String   @default("")
+  /// 第三方展示监测链接（创意层 impression_url）
+  impressionUrl String   @default("")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+/// 素材日报 —— 素材看板的历史数据底座（**永久留存**，永不清理）。
+///
+/// 为什么必须落库：
+///   平台实时素材报表（v1/report/material_report）只能查「近 7 天」，
+///   一旦超出窗口就再也取不回来。要做到「长期回溯与分析」，
+///   唯一可行的办法是每天把明细同步到本地并永久累积。
+///
+/// 唯一键 = 账户 × 素材 × 日期。同一天重复同步走 upsert（当天数据会
+/// 随投放推进不断变大，必须允许覆盖更新）。
+model ReportDailyStat {
+  id           Int    @id @default(autoincrement())
+  advertiserId String
+  /// 数据日期 yyyy-MM-dd
+  statDate     String
+  /// -1 = 全天（日行，盯盘看板区间汇总用）；0-23 = 小时行（分时走势用）。
+  /// 用 -1 而不是 NULL：SQLite 的唯一索引对 NULL 不去重。
+  statHour     Int    @default(-1)
+
+  // —— 原始计数：比率一律「分子/分母」现算，不做比率平均 ——
+  charge           Float @default(0)
+  /// 封面曝光数（平台 show）—— 存档用，不参与展示
+  show             Int   @default(0)
+  /// 素材曝光数（平台 aclick）—— 看板的「展示数」
+  aclick           Int   @default(0)
+  photoClick       Int   @default(0)
+  /// 行为数（平台 bclick）—— 看板的「点击数」
+  bclick           Int   @default(0)
+  conversionNum    Int   @default(0)
+  activation       Int   @default(0)
+  registerCount    Int   @default(0)
+  payCount         Int   @default(0)
+  payFirstDayCount Int   @default(0)
+
+  syncedAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([advertiserId, statDate, statHour])
+  @@index([statDate])
+  @@index([advertiserId, statDate])
+}
+
+model MaterialDailyStat {
+  id           Int    @id @default(autoincrement())
+  advertiserId String
+  /// 视频 photo_id（19 位，超出 JS 安全整数，按 String 存）
+  photoId      String
+  /// 数据日期 yyyy-MM-dd
+  statDate     String
+  /// 素材名（视频库 photo_name 回填，落库后即使素材被删也能保留）
+  materialName String?
+  /// 视频地址（photo_url），用于素材预览播放
+  photoUrl     String?
+  /// 封面地址（cover_url）
+  coverUrl     String?
+  /// 作品广告语（photo_caption）
+  caption      String?
+  /// 素材类型 creative_material_type：1 竖版视频 / 2 横版视频 …
+  materialType Int?
+
+  // —— 原始计数：区间汇总必须从计数重算，比率不能做算术平均 ——
+  charge        Float @default(0)
+  /// 封面曝光数（平台 show）—— 数值很小（如 738），**只用于算千展**
+  show          Int   @default(0)
+  /// 素材曝光数（平台 aclick，实测与 played_num 恒等）—— 数值很大（如 161683），
+  /// **看板的「展示数」与点击率分母必须用它**。用 show 当分母会算出 473% 这种荒唐点击率。
+  aclick        Int   @default(0)
+  /// 封面点击数（平台 photo_click）—— 数值很小，仅存档，不参与看板展示
+  photoClick    Int   @default(0)
+  /// 行为数（平台 bclick）—— 真正的「点击数」
+  bclick        Int   @default(0)
+  activation    Int   @default(0)
+  registerCount Int   @default(0)
+  conversionNum Int   @default(0)
+  /// 播放数（有则作为播放率加权分母，否则退回展示数）
+  playedNum     Int   @default(0)
+
+  // —— 平台比率（单日口径，区间按权重重新加权）——
+  play3sRatio  Float @default(0)
+  playEndRatio Float @default(0)
+
+  /// 平台原始行 JSON，便于后续补字段而不用重新拉数
+  rawJson  String?
+  syncedAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([advertiserId, photoId, statDate])
+  @@index([statDate])
+  @@index([photoId])
+  @@index([advertiserId, statDate])
+}

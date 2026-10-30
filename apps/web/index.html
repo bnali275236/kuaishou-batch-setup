@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>快手广告工作台</title>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!--
+      加载失败兜底：模块脚本加载/执行失败时（典型场景：软件升级后本地缓存仍指向
+      已删除的旧 bundle），用一段可操作的提示代替纯白屏，别让用户对着白屏无计可施。
+      正常渲染时 root 有内容，这段永远不会显示。
+    -->
+    <div
+      id="boot-fallback"
+      style="display:none;font:14px/1.8 system-ui,'Microsoft YaHei',sans-serif;color:#333;padding:56px;max-width:680px;margin:0 auto"
+    >
+      <h3 style="margin:0 0 12px;font-size:18px">页面资源加载失败</h3>
+      <p style="color:#666;margin:0 0 8px">最常见原因：软件刚升级，本地缓存仍指向旧版本文件。</p>
+      <p style="color:#666;margin:0 0 16px">
+        请先<b>完全关闭软件后重新打开</b>；若仍然白屏，请重新运行一次安装包覆盖安装。
+      </p>
+      <p style="color:#999;margin:0;font-size:12px">排障信息可查看日志：%APPDATA%\快手投放工作台\logs\desktop.log</p>
+    </div>
+
+    <script>
+      (function () {
+        var shown = false;
+        function show() {
+          if (shown) return;
+          var root = document.getElementById('root');
+          var el = document.getElementById('boot-fallback');
+          if (!el || !root) return;
+          if (root.children.length > 0) return;
+          shown = true;
+          el.style.display = 'block';
+        }
+        // 模块脚本加载失败 / 执行抛错
+        window.addEventListener(
+          'error',
+          function (e) {
+            if (e && e.target && e.target.tagName === 'SCRIPT') show();
+          },
+          true,
+        );
+        // 兜底：首屏迟迟没渲染出来
+        setTimeout(show, 6000);
+      })();
+    </script>
+
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,53 @@
+{
+  "name": "@wkbd/desktop",
+  "productName": "快手投放工作台",
+  "version": "0.6.1",
+  "private": true,
+  "description": "快手广告批量上计划工作台 - 桌面版",
+  "author": "wkbd",
+  "main": "main.js",
+  "scripts": {
+    "stage": "node scripts/stage.js",
+    "desktop:dev": "electron .",
+    "desktop:pack": "node scripts/stage.js && electron-builder --win nsis",
+    "desktop:dir": "node scripts/stage.js && electron-builder --win nsis --dir"
+  },
+  "devDependencies": {
+    "electron": "33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.wkbd.kuaishou.console",
+    "productName": "快手投放工作台",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "desktop"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "快手投放工作台"
+    }
+  }
+}

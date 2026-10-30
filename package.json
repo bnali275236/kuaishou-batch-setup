@@ -1,0 +1,30 @@
+{
+  "name": "wkbd-kuaishou-console",
+  "version": "0.1.0",
+  "private": true,
+  "description": "快手广告批量上计划 & 日常盯盘工作台",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build:shared": "npm --workspace @wkbd/shared run build",
+    "dev": "concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm --workspace @wkbd/server run start:dev",
+    "dev:web": "npm --workspace @wkbd/web run dev",
+    "build": "npm run build:shared && npm --workspace @wkbd/server run build && npm --workspace @wkbd/web run build",
+    "desktop:pack": "npm --workspace @wkbd/desktop run desktop:pack",
+    "desktop:dir": "npm --workspace @wkbd/desktop run desktop:dir",
+    "desktop:dev": "npm --workspace @wkbd/desktop run desktop:dev",
+    "db:migrate": "npm --workspace @wkbd/server run db:migrate",
+    "db:generate": "npm --workspace @wkbd/server run db:generate",
+    "setup": "npm run build:shared && npm run db:generate && npm run db:migrate"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1",
+    "typescript": "^5.6.3"
+  }
+}

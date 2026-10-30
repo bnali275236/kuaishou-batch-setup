@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "baseUrl": "./",
+    "strict": true,
+    "strictPropertyInitialization": false,
+    "noImplicitAny": true,
+    "noFallthroughCasesInSwitch": false,
+    "declaration": false,
+    // 必须关闭增量编译：nest build 的 deleteOutDir 会清空 dist，
+    // 而增量缓存会让 tsc 误判产物已存在、只编译改动文件，导致 dist 残缺
+    "incremental": false
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
