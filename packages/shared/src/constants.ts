@@ -107,6 +107,10 @@ export const MAPI_PATHS = {
   ADVERTISER_FUND: '/rest/openapi/v1/advertiser/fund/get',
   ADVERTISER_FUND_FLOWS: '/rest/openapi/v1/advertiser/fund/daily_flows',
   ADVERTISER_WHITE_LIST: '/rest/openapi/v1/advertiser/white_list',
+  // 账户日预算（doc 2072）：day_budget 单位厘，0=不限；不得低于当日最高花费 1.2 倍与原预算较小者
+  ADVERTISER_BUDGET_UPDATE: '/rest/openapi/v1/advertiser/update/budget',
+  // 账户日预算查询（doc 1961）
+  ADVERTISER_BUDGET_QUERY: '/rest/openapi/v1/advertiser/budget/get',
 
   // 报表（实时）
   REPORT_ACCOUNT: '/rest/openapi/v1/report/account_report',

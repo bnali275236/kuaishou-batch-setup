@@ -150,6 +150,22 @@ export default function AccountsPage() {
     onError: (err) => modal.error({ title: '刷新失败', content: explainError(err) }),
   });
 
+  const refreshNameMutation = useMutation({
+    mutationFn: (advertiserId: string) =>
+      api.post<{ ok: boolean; name: string | null; previous: string | null }>(
+        `/api/oauth/accounts/${advertiserId}/refresh-name`,
+      ),
+    onSuccess: (data) => {
+      message.success(
+        data.previous && data.previous !== data.name
+          ? `账户名称已更新：${data.previous} → ${data.name}`
+          : `名称已是最新：${data.name ?? ''}`,
+      );
+      invalidateAll();
+    },
+    onError: (err) => modal.error({ title: '刷新名称失败', content: explainError(err) }),
+  });
+
   const whiteListMutation = useMutation({
     mutationFn: (id: string) => api.post(`/api/accounts/${id}/white-list/sync`),
     onSuccess: (data: unknown) => {
@@ -277,9 +293,21 @@ export default function AccountsPage() {
     {
       title: '操作',
       key: 'actions',
-      width: 220,
+      width: 290,
       render: (_, row) => (
         <Space size={4} wrap>
+          <Tooltip title="平台侧改过账户名？点此立即从快手拉取最新名称">
+            <Button
+              size="small"
+              type="link"
+              loading={
+                refreshNameMutation.isPending && refreshNameMutation.variables === row.advertiserId
+              }
+              onClick={() => refreshNameMutation.mutate(row.advertiserId)}
+            >
+              刷新名称
+            </Button>
+          </Tooltip>
           <Tooltip title="同步平台白名单能力快照（创编能力需要快手运营加白）">
             <Button size="small" type="link" onClick={() => whiteListMutation.mutate(row.advertiserId)}>
               同步白名单

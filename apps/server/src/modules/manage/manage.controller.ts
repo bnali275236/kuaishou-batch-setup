@@ -36,6 +36,12 @@ class UnitBidDto {
   bidYuan!: number;
 }
 
+class AdvertiserBudgetDto {
+  advertiserId!: string;
+  /** 单位：元（0 = 不限），服务端转厘 */
+  budgetYuan!: number;
+}
+
 class UnitScheduleDto {
   advertiserId!: string;
   unitId!: string;
@@ -72,6 +78,18 @@ export class ManageController {
   @Post('unit-budget')
   unitBudget(@Body() body: UnitBudgetDto) {
     return this.manage.updateUnitBudget(body.advertiserId, body.unitId, body.budgetYuan);
+  }
+
+  /** 改账户日预算 */
+  @Post('advertiser-budget')
+  advertiserBudget(@Body() body: AdvertiserBudgetDto) {
+    return this.manage.updateAdvertiserBudget(body.advertiserId, body.budgetYuan);
+  }
+
+  /** 查账户日预算 */
+  @Post('advertiser-budget/get')
+  advertiserBudgetGet(@Body() body: { advertiserId: string }) {
+    return this.manage.getAdvertiserBudget(body.advertiserId);
   }
 
   /** 批量改组出价 */

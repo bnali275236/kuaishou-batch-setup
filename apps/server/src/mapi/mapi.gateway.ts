@@ -9,7 +9,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { classifyMapiError, classifyNetworkError, isRetryable } from './error-classifier';
 import { MapiError } from './mapi-error';
-import { getJson, getText, postJson } from './mapi-http';
+import { getJson, getText, postJson, postMultipart } from './mapi-http';
 import { RateLimiterService, RateCategory } from './rate-limiter.service';
 import { sleep } from './token-bucket';
 import { TokenService } from './token.service';
@@ -26,6 +26,11 @@ export interface MapiCallOptions {
    * 'text' = 原始文本（异步任务 CSV 下载），平台报错时响应仍是 JSON，仍走错误分类
    */
   responseType?: 'json' | 'text';
+  /**
+   * Multipart 上传（FORM 格式接口，如 v2/file/ad/video/upload）。
+   * 设置后 body 的字符串字段作为表单域，二进制部分作为 file 字段发出。
+   */
+  multipart?: { fileName?: string; contentType?: string; buffer: Buffer };
   /** 调用类别，决定限流桶 */
   category?: RateCategory;
   /** 审计用：谁发起的 */
@@ -169,10 +174,17 @@ export class MapiGateway {
               headers,
               timeoutMs: opts.timeoutMs,
             })
-        : await postJson(opts.path, opts.body ?? {}, {
-            headers,
-            timeoutMs: opts.timeoutMs,
-          });
+        : opts.multipart
+          ? await postMultipart(
+              opts.path,
+              opts.body as Record<string, string | number | undefined>,
+              opts.multipart,
+              { headers, timeoutMs: opts.timeoutMs },
+            )
+          : await postJson(opts.path, opts.body ?? {}, {
+              headers,
+              timeoutMs: opts.timeoutMs,
+            });
 
     // —— 原始文本响应（CSV 下载）：拿到非 JSON 文本即成功；JSON 响应说明平台报错，走错误分类 ——
     if (opts.responseType === 'text') {

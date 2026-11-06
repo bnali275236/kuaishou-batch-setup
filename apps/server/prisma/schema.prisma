@@ -114,6 +114,8 @@ model OauthAccount {
   /// 白名单能力快照（JSON），用于前端动态裁剪可用功能
   whiteListJson String?
   lastSyncAt    DateTime?
+  /// 上次从平台 advertiser/info 拉取账户名称的时间（用于周期性刷新已改名的账户）
+  nameSyncedAt  DateTime?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 

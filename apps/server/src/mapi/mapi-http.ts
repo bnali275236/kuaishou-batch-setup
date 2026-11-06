@@ -142,3 +142,52 @@ export async function getText(
 
   return { status: res.status, text, json, durationMs: Date.now() - startedAt };
 }
+
+/**
+ * Multipart 版本：视频/图片上传接口（FORM 格式，如 v2/file/ad/video/upload）。
+ * fields 走普通表单字段，file 为二进制部分（字段名固定 file）。
+ * 注意：Node 18+ 原生 FormData/Blob，无需额外依赖。
+ */
+export async function postMultipart(
+  path: string,
+  fields: Record<string, string | number | undefined>,
+  file: { buffer: Buffer; fileName?: string; contentType?: string },
+  opts: PostJsonOptions = {},
+): Promise<RawHttpResult> {
+  const url = path.startsWith('http') ? path : `${MAPI_BASE_URL}${path}`;
+  const startedAt = Date.now();
+
+  const form = new FormData();
+  for (const [k, v] of Object.entries(fields)) {
+    if (v !== undefined && v !== '') form.append(k, String(v));
+  }
+  form.append(
+    'file',
+    new Blob([new Uint8Array(file.buffer)], { type: file.contentType ?? 'application/octet-stream' }),
+    file.fileName ?? 'file',
+  );
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { ...(opts.headers ?? {}) },
+    body: form,
+    signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+  });
+
+  const text = await res.text();
+  const durationMs = Date.now() - startedAt;
+
+  let json: Record<string, unknown> | undefined;
+  try {
+    json = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    json = undefined;
+  }
+
+  return {
+    status: res.status,
+    json,
+    text: text.length > MAX_TEXT_KEEP ? `${text.slice(0, MAX_TEXT_KEEP)}…[已截断]` : text,
+    durationMs,
+  };
+}

@@ -24,7 +24,10 @@ export class TokenScheduler implements OnModuleInit {
     setTimeout(() => void this.backfillAccountNames(), 30_000).unref?.();
   }
 
-  /** 每 5 分钟补一批缺失的账户名称（approval/list 只回 ID，名称要逐个调 advertiser/info） */
+  /**
+   * 每 5 分钟补一批账户名称（approval/list 只回 ID，名称要逐个调 advertiser/info）：
+   * 先补缺失的，再用剩余配额刷新超过 24h 没同步的 —— 平台侧改名的账户会自动跟上
+   */
   @Cron(CronExpression.EVERY_5_MINUTES)
   async backfillAccountNames(): Promise<void> {
     try {

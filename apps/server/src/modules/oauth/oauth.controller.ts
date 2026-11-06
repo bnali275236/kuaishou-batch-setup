@@ -195,6 +195,13 @@ export class OauthController {
     return { ok: true, grants: await this.tokens.listGrants() };
   }
 
+  /** 立即刷新单个账户的名称（平台侧改过名后点这个，不用等定时任务） */
+  @Post('accounts/:advertiserId/refresh-name')
+  async refreshName(@Param('advertiserId') advertiserId: string) {
+    const r = await this.tokens.refreshAccountName(advertiserId);
+    return { ok: true, ...r, accounts: await this.tokens.listAccounts() };
+  }
+
   @Patch('accounts/:advertiserId/enabled')
   async setEnabled(
     @Param('advertiserId') advertiserId: string,

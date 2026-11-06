@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { PLAN_PATHS, PUT_STATUS_CODE, yuanToLi } from '@wkbd/shared';
+import { MAPI_PATHS, PLAN_PATHS, PUT_STATUS_CODE, yuanToLi } from '@wkbd/shared';
 import { MapiGateway } from '../../mapi/mapi.gateway';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PlanApi, StatusUpdateResult } from '../plan/plan.api';
@@ -22,6 +22,8 @@ export interface StructureItem {
   bidType: number | null;
   /** 投放时段（24*7 的 0/1 串）—— 仅组；null = 全时段 */
   scheduleTime: string | null;
+  /** 投放版位 scene_ids —— 仅组；用于核验平台是否把优选(1)静默扩成 [1,10] 联盟 */
+  sceneIds: number[] | null;
   putStatusText: string;
 }
 
@@ -165,6 +167,10 @@ export class ManageService {
       bidYuan: this.liToYuan(this.num(r.bid) > 0 ? this.num(r.bid) : this.num(r.cpa_bid)),
       bidType: r.bid_type != null ? Number(r.bid_type) : null,
       scheduleTime: (r.schedule_time as string | undefined) ?? null,
+      sceneIds:
+        level === 'unit' && Array.isArray(r.scene_ids)
+          ? (r.scene_ids as unknown[]).map((x) => Number(x))
+          : null,
     };
     return base;
   }
@@ -228,6 +234,35 @@ export class ManageService {
       },
       category: 'create',
       action: 'manage.unit.update_budget',
+    });
+  }
+
+  /** 改账户日预算（元 → 厘；0 = 不限）。文档 2072：500 元 ≤ 值 ≤ 1 亿 */
+  async updateAdvertiserBudget(
+    advertiserId: string,
+    budgetYuan: number,
+  ): Promise<Record<string, unknown>> {
+    await this.assertWritable(advertiserId);
+    return this.gateway.call<Record<string, unknown>>({
+      advertiserId,
+      path: MAPI_PATHS.ADVERTISER_BUDGET_UPDATE,
+      body: {
+        advertiser_id: this.numericId(advertiserId),
+        day_budget: yuanToLi(budgetYuan),
+      },
+      category: 'create',
+      action: 'manage.advertiser.update_budget',
+    });
+  }
+
+  /** 查账户日预算（doc 1961） */
+  async getAdvertiserBudget(advertiserId: string): Promise<Record<string, unknown>> {
+    return this.gateway.call<Record<string, unknown>>({
+      advertiserId,
+      path: MAPI_PATHS.ADVERTISER_BUDGET_QUERY,
+      body: { advertiser_id: this.numericId(advertiserId) },
+      category: 'query',
+      action: 'manage.advertiser.get_budget',
     });
   }
 

@@ -1,7 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import dayjs from 'dayjs';
 import { MAPI_PATHS } from '@wkbd/shared';
 import { MapiGateway } from '../../mapi/mapi.gateway';
+import { PrismaService } from '../../prisma/prisma.service';
 
 /**
  * 账户资产同步（视频 / 应用 / 建站落地页）。
@@ -105,7 +107,10 @@ export class PlanAssetsService {
   /** 素材名缓存，key = `${advertiserId}:${photoId}`（按 id 精确取名用，避免重复请求） */
   private readonly videoNameCache = new Map<string, { name: string; expiresAt: number }>();
 
-  constructor(private readonly gateway: MapiGateway) {}
+  constructor(
+    private readonly gateway: MapiGateway,
+    private readonly prisma: PrismaService,
+  ) {}
 
 
   async listVideos(advertiserId: string, force = false): Promise<AssetItem[]> {
@@ -185,6 +190,69 @@ export class PlanAssetsService {
       }
     }
     return out;
+  }
+
+  /**
+   * 按 photoId 批量核对素材在库情况（素材库共享/跨户搬运用）。
+   * 返回 { photoId: 存在时为素材名，不存在为 null }。
+   */
+  async checkVideosByIds(
+    advertiserId: string,
+    photoIds: string[],
+  ): Promise<Record<string, string | null>> {
+    const names = await this.listVideoNamesByIds(advertiserId, photoIds);
+    const out: Record<string, string | null> = {};
+    for (const id of [...new Set(photoIds.filter(Boolean))]) out[id] = names.get(id) ?? null;
+    return out;
+  }
+
+  /**
+   * 从 URL 拉取视频并上传到账户素材库（跨户素材搬运，doc 1906 v2 上传）。
+   * 下载 → md5 签名 → multipart 上传；返回新 photo_id。
+   * 🚫 代投白名单拦截：白名单账户只读，禁止向其素材库写入。
+   */
+  async uploadVideoFromUrl(
+    advertiserId: string,
+    url: string,
+    name: string,
+  ): Promise<{ photoId: string; sizeBytes: number }> {
+    const locked = await this.prisma?.oauthAccount?.findFirst?.({
+      where: { advertiserId, readOnly: true },
+      select: { advertiserId: true },
+    });
+    if (locked) {
+      throw new Error(`账户 ${advertiserId} 在「代投白名单」内，禁止上传素材`);
+    }
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`素材下载失败 HTTP ${res.status}`);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (buffer.length < 1024) throw new Error(`素材下载内容过小(${buffer.length}B)，疑似失效链接`);
+    const signature = createHash('md5').update(buffer).digest('hex');
+    const data = await this.gateway.call<Record<string, unknown>>({
+      advertiserId,
+      path: MAPI_PATHS.VIDEO_UPLOAD,
+      category: 'create',
+      timeoutMs: 120_000,
+      body: {
+        advertiser_id: Number(advertiserId),
+        signature,
+        photo_name: name.slice(0, 50),
+        type: 1, // 信息流竖版
+      },
+      multipart: { buffer, fileName: 'video.mp4', contentType: 'video/mp4' },
+      action: 'plan.assets.video_upload',
+    });
+    const photoId =
+      pickString(data, ['photo_id']) ??
+      pickString((data.data as Record<string, unknown>) ?? {}, ['photo_id']);
+    if (!photoId) {
+      throw new Error(`上传响应无 photo_id：${JSON.stringify(data).slice(0, 200)}`);
+    }
+    this.videoNameCache.set(`${advertiserId}:${photoId}`, {
+      name,
+      expiresAt: Date.now() + VIDEO_NAME_TTL_MS,
+    });
+    return { photoId, sizeBytes: buffer.length };
   }
 
   /**

@@ -1,7 +1,7 @@
 {
   "name": "@wkbd/desktop",
   "productName": "快手投放工作台",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "private": true,
   "description": "快手广告批量上计划工作台 - 桌面版",
   "author": "wkbd",

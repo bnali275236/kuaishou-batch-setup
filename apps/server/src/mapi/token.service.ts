@@ -669,62 +669,70 @@ export class TokenService {
     return rows.map((r) => this.toAccountSummary(r));
   }
 
+  /** 名称刷新门槛：上次同步超过该时长的已有名称账户才会被自动重新拉取 */
+  private static readonly NAME_REFRESH_INTERVAL_MS = 24 * 3600 * 1000;
+
   /**
-   * 回填缺失的账户名称并落库。
+   * 回填/刷新账户名称并落库。
    *
-   * 背景：approval/list 只回广告主 ID，真实名称（如【kuaishouapp382-1.03】信息流-激活-…）
-   * 要逐个调 v1/advertiser/info 补齐。历史版本把回填塞在 listAccounts 里且单次最多 20 个，
-   * 账户一多就会出现「未命名账户」长期残留 —— 用户以为是接口限额，实际是还没轮到。
+   * 两级队列（每轮有界，避免占满限流桶）：
+   *   1. 缺失名称的账户（accountName 为空）—— 优先补齐
+   *   2. 已有名称但超过 24h 没同步的 —— 按最旧优先刷新，让「平台侧已改名」
+   *      的账户自动跟上（此前只补缺失，改名的账户永远不更新，124276386 事故）
    *
-   * 现在由定时任务周期性全量补齐（每轮有界，避免占满限流桶），失败只记日志不影响主流程。
+   * 拉取异常（网络/限流）不写 nameSyncedAt，下轮自然重试；
+   * 平台响应成功但没有名称字段时也记 nameSyncedAt，避免反复占配额。
    */
   async backfillMissingNames(max = 100): Promise<number> {
+    // 第一优先：补缺失
     const missing = await this.prisma.oauthAccount.findMany({
       where: { accountName: null },
-      select: { advertiserId: true, grantId: true },
+      select: { advertiserId: true, grantId: true, accountName: true },
       orderBy: { createdAt: 'asc' },
       take: max,
     });
-    if (missing.length === 0) return 0;
+
+    // 第二优先：刷新最久没同步的已有名称（用剩余配额，不挤占补缺失的额度）
+    let stale: Array<{ advertiserId: string; grantId: number; accountName: string | null }> = [];
+    const quota = max - missing.length;
+    if (quota > 0) {
+      stale = await this.prisma.oauthAccount.findMany({
+        where: {
+          accountName: { not: null },
+          OR: [
+            { nameSyncedAt: null },
+            { nameSyncedAt: { lt: new Date(Date.now() - TokenService.NAME_REFRESH_INTERVAL_MS) } },
+          ],
+        },
+        select: { advertiserId: true, grantId: true, accountName: true },
+        orderBy: [{ nameSyncedAt: 'asc' }, { updatedAt: 'asc' }],
+        take: quota,
+      });
+    }
+
+    const rows = [...missing, ...stale];
+    if (rows.length === 0) return 0;
 
     let filled = 0;
-    for (const row of missing) {
+    for (const row of rows) {
+      const isNew = row.accountName === null;
       try {
-        const accessToken = await this.getGrantAccessToken(row.grantId);
-        await this.limiter.acquire('query');
-
-        // v1/advertiser/info 主用 POST（body 带 advertiser_id，鉴权走 Access-Token 头）；
-        // 兜底再试 GET query 形态，两种外壳/方法都认
-        let first: Record<string, unknown> | undefined;
-        try {
-          const res = await postJson(
-            MAPI_PATHS.ADVERTISER_INFO,
-            { advertiser_id: Number(row.advertiserId) || row.advertiserId },
-            { headers: { 'Access-Token': accessToken }, timeoutMs: 15_000 },
-          );
-          first = this.pickAdvertiserInfo(res.json);
-        } catch {
-          first = undefined;
-        }
-        if (!first) {
-          const res = await getJson(
-            MAPI_PATHS.ADVERTISER_INFO,
-            { advertiser_id: Number(row.advertiserId) || row.advertiserId },
-            { headers: { 'Access-Token': accessToken }, timeoutMs: 15_000 },
-          );
-          first = this.pickAdvertiserInfo(res.json);
-        }
-
-        const name = first
-          ? String(first.user_name ?? first.name ?? first.advertiser_name ?? '').trim()
-          : '';
+        const name = await this.fetchAccountName(row.advertiserId, row.grantId);
+        await this.prisma.oauthAccount.update({
+          where: { advertiserId: row.advertiserId },
+          data: {
+            ...(name ? { accountName: name } : {}),
+            nameSyncedAt: new Date(),
+          },
+        });
         if (name) {
-          await this.prisma.oauthAccount.update({
-            where: { advertiserId: row.advertiserId },
-            data: { accountName: name },
-          });
           filled += 1;
-          this.logger.log(`账户 ${row.advertiserId} 名称回填：${name}`);
+          const renamed = !isNew && row.accountName !== name;
+          this.logger.log(
+            renamed
+              ? `账户 ${row.advertiserId} 名称已更新：${row.accountName} → ${name}`
+              : `账户 ${row.advertiserId} 名称回填：${name}`,
+          );
         } else {
           // 拉到了响应但没有可用的名称字段 —— 记警告，避免继续「静默跳过」没法排查
           this.logger.warn(
@@ -736,6 +744,62 @@ export class TokenService {
       }
     }
     return filled;
+  }
+
+  /** 立即刷新单个账户的名称（绕过 24h 门槛，供前端「刷新名称」按钮）。返回新旧名称。 */
+  async refreshAccountName(
+    advertiserId: string,
+  ): Promise<{ name: string | null; previous: string | null }> {
+    const row = await this.prisma.oauthAccount.findUnique({
+      where: { advertiserId },
+      select: { advertiserId: true, grantId: true, accountName: true },
+    });
+    if (!row) throw new Error(`账户 ${advertiserId} 不存在`);
+
+    const name = await this.fetchAccountName(advertiserId, row.grantId);
+    if (!name) throw new Error('平台未返回该账户的名称（advertiser/info 无 name 字段）');
+
+    await this.prisma.oauthAccount.update({
+      where: { advertiserId },
+      data: { accountName: name, nameSyncedAt: new Date() },
+    });
+    if (name !== row.accountName) {
+      this.logger.log(`账户 ${advertiserId} 名称已更新：${row.accountName} → ${name}`);
+    }
+    return { name, previous: row.accountName };
+  }
+
+  /**
+   * 调 v1/advertiser/info 取单个账户的当前名称。
+   * 主用 POST（body 带 advertiser_id，鉴权走 Access-Token 头）；兜底再试 GET query 形态。
+   * 返回空字符串 = 响应成功但平台没给名称字段（与「拉取失败抛异常」区分开）。
+   */
+  private async fetchAccountName(advertiserId: string, grantId: number): Promise<string> {
+    const accessToken = await this.getGrantAccessToken(grantId);
+    await this.limiter.acquire('query');
+
+    let first: Record<string, unknown> | undefined;
+    try {
+      const res = await postJson(
+        MAPI_PATHS.ADVERTISER_INFO,
+        { advertiser_id: Number(advertiserId) || advertiserId },
+        { headers: { 'Access-Token': accessToken }, timeoutMs: 15_000 },
+      );
+      first = this.pickAdvertiserInfo(res.json);
+    } catch {
+      first = undefined;
+    }
+    if (!first) {
+      const res = await getJson(
+        MAPI_PATHS.ADVERTISER_INFO,
+        { advertiser_id: Number(advertiserId) || advertiserId },
+        { headers: { 'Access-Token': accessToken }, timeoutMs: 15_000 },
+      );
+      first = this.pickAdvertiserInfo(res.json);
+    }
+    return first
+      ? String(first.user_name ?? first.name ?? first.advertiser_name ?? '').trim()
+      : '';
   }
 
   /** 从 advertiser/info 两种响应形态里捞出第一个条目（data 数组 / data.list） */
