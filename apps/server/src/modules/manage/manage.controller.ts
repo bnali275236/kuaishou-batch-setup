@@ -9,6 +9,12 @@ class StructureDto {
   unitId?: string;
 }
 
+class StructureByIdsDto {
+  advertiserId!: string;
+  level!: ManageLevel;
+  ids!: string[];
+}
+
 class StatusDto {
   advertiserId!: string;
   level!: ManageLevel;
@@ -66,6 +72,12 @@ export class ManageController {
   @Post('status')
   status(@Body() body: StatusDto) {
     return this.manage.setStatus(body.advertiserId, body.level, body.ids ?? [], body.action);
+  }
+
+  /** 按 ID 批量查层级状态（全量列表会漏常规计划，状态自查一律走这里） */
+  @Post('structure/by-ids')
+  structureByIds(@Body() body: StructureByIdsDto) {
+    return this.manage.listByIds(body.advertiserId, body.level, body.ids ?? []);
   }
 
   /** 改计划日预算 */

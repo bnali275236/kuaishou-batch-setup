@@ -5,6 +5,7 @@
 **运行形态（2026-11-06 起）**：主用「网页版」——双击仓库根目录 `启动网页版.cmd`（纯 ASCII，仅调 `node tools/web-launch.cjs`），后者设 `DATA_DIR=%APPDATA%/快手投放工作台` + `WEB_DIST=apps/web/dist` + 迁移 → 启动后端 7801 同源托管前端。数据与桌面版完全同源；**桌面版与网页版不可同时运行**（token 轮换互踢）。停止：`停止网页版.cmd`。
 ⚠️ 批处理坑：**.cmd 必须纯 ASCII + CRLF 换行**。中文路径/中文提示在 GBK 控制台下会被读花（曾出现 DATA_DIR 静默失效→连到空开发库、前端 404；LF 换行→单词被截断报 `'ishou' 不是内部命令`）。所有中文路径逻辑放 Node 脚本里（Node 固定 UTF-8）。
 已推 Gitee 私有仓库 `Sakura777777/kuaishou-batch-setup`（凭据在 Windows 凭据管理器，直接 git push 即可）。
+**双远端**：`origin`=Gitee、`github`=GitHub 私有 `bnali275236/kuaishou-batch-setup`（本机凭据管理器已有 GitHub PAT，scopes: gist/read:org/repo/workflow，无需再要令牌）。同步命令：`git push origin master && git push github master`。
 ⚠️ 工具会话里起的后端进程会被回收，长驻服务必须由用户双击启动（或做开机自启）。
 
 ## 架构三原则
@@ -25,6 +26,10 @@ access 1 天 / refresh 30 天，**刷新即轮换（旧的立即失效）**→ �
 - 401000=业务校验不通过（已按官方 13.2 补 30+ 条，别关键字兜底）；402012=应用下线
 - 状态更新只传复数主键（单复数同传报 401000 重复id）；必须检查响应 `errors`（否则部分失败被瞒成成功）
 - 平台会静默改写字段（scene_id/app_id/image_token）→ 回读只比对名称
+- ⚠️ **版位 scene_id 铁律**（2026-11-06 实测纠错）：**只传 `scene_id:[6]`（上下滑大屏）能建成功**；
+  传 `[6,7]` 或 `[7]` 报 401000「信息流广告位已下线」——**这句文案会误导成 6 下线，实际是 7 不可用**。
+  `[1]` 优选可用但账户在联盟优选白名单时会**静默扩成 [1,10]**（10=联盟，用户明确拒绝）。
+  → 结论：要纯站内信息流，只填 `[6]`，绝不带 1 或 7；组列表/详情用 `scene_id`（**单数**）回读核验。
 - **前缀陷阱**：创建/查询 `gw/dsp/{campaign,unit,creative}/*`；状态更新 `v1/{campaign,ad_unit,creative}/update/status`，不可互相外推；三层入参一致：advertiser_id+批量字段+put_status(1/2/3)
 - **报表口径**：show=封面曝光（勿用）；**aclick=素材曝光=展示数**（点击率/千展分母）；photo_click 勿用；bclick=点击数；click_1k_cost=千展。三列须可互相验算
 - 素材报表 material_report：view_type=5 必传、page≤1000、近 7 天、无素材名
@@ -54,3 +59,12 @@ vite emptyOutDir 关掉、由 stage.js `pruneUnreferencedAssets()` 清（须扫�
 
 ## 待确认
 告警通道（P2 用）：企微 / 飞书 / 邮件；素材看板 6 个月回溯方案已定未实施。
+
+## ffmpeg 获取方式（2026-11-06 起）
+官网包国内 23KB/s 下不动；用 ffmpeg-installer-win32-x64-4.1.0.tgz 12 秒拿到 ffmpeg.exe（4.1，含 libx264）。平台视频码率门槛≈1000kbps，重编码按 2000k 出。
+
+## ✅ 任务引擎默认投放（2026-11-09 改）
+`DEFAULT_INITIAL_STATUS` 已改为 **RUNNING**（用户拍板：账户日预算卡上限，创建即暂停只会白丢流量；风控交给事后关停）。POST /api/plan/tasks 不传 initialStatus 即直接投放；需要人工复核时显式传 `initialStatus:'PAUSED'`（此时 enforcePaused 收尾把计划压暂停，仅 CAMPAIGN 层）。仍建议脚本建完回读自查（scene/bid/文案一致性）+ 收尾再 RUN 一次幂等。
+**状态查询必须用 `POST /api/manage/structure/by-ids`**：平台 campaign/list 全量列表在 UAX 账户下不返回常规计划（386 全量 372 条全是 UAX），全量列表查状态等于盲查。巡检 tools/monitor.cjs 的 ensureRunning()（A8）每小时核验近 36h 计划、发现暂停立即重开并告警，豁免名单 `.runtime/pause-exempt.json`。
+自动执行器 tools/auto-exec.cjs（B档已授权)：K1≥36元0激活 / K2≥54元CPA≥18 关停，B1/B2/B3 出价区间 [8,10]；UNIT payload 的 cpa_bid 单位是厘。效果台账 tools/auto-effects.cjs：动作前后快照 + 6h/24h 宽松回看。
+平台枚举坑：unit payload 的 `package_id` 是**数字包 ID**（1099685944711），不是包名 com.pzds.pzds。

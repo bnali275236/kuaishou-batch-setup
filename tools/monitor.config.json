@@ -1,0 +1,51 @@
+{
+  "accounts": [
+    { "id": "124276386", "tag": "386" },
+    { "id": "124276387", "tag": "387" }
+  ],
+  "api": "http://127.0.0.1:7801",
+  "dingtalk": {
+    "group": "快手投放沟通群",
+    "enabled": true
+  },
+  "bidYuan": 9,
+  "dailyBudgetYuan": 2500,
+  "learning": {
+    "observeMaxAct": 8,
+    "rampMaxAct": 20,
+    "cpaRampWarn": 18,
+    "cpaRampHard": 22.5,
+    "cpaRampHardMinCharge": 45,
+    "cpaMatureWarn": 13.5,
+    "cpaMatureRed": 15,
+    "cpaMatureRedMinCharge": 90,
+    "emptySpendCharge": 36,
+    "accountEmptySpendCharge": 60
+  },
+  "thresholds": {
+    "clickNoConvCount": 20,
+    "clickNoConvMinutes": 120,
+    "paceLow": 0.5,
+    "paceHigh": 1.8,
+    "budgetHitAt": 22,
+    "c3MinHour": 13,
+    "c3MinShow": 800,
+    "c3MinCharge": 3,
+    "c4MinShow": 2000,
+    "c4MaxCtr": 0.006,
+    "c5MaxCpa": 8,
+    "c5MinAct": 3
+  },
+  "dedupeMinutes": 90,
+  "heartbeat": true,
+  "autoExecute": {
+    "enabled": true,
+    "level": "B",
+    "bidMin": 8,
+    "bidMax": 10,
+    "bidBase": 9,
+    "maxActionsPerHour": 8,
+    "maxKillPerDay": 10,
+    "maxBidPerDay": 12
+  }
+}

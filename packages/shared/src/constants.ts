@@ -606,11 +606,13 @@ export const STATUS_UPDATE_BATCH_LIMIT = {
 
 /**
  * 批量任务的「创建后状态」。
- * 默认暂停：批量创建 100 条一旦默认投放，就是真实预算风险；
- * 暂停后由投手复核定向 / 出价 / 素材，再决定是否启用。
+ * 默认投放（2026-11-09 用户拍板改）：账户日预算已卡死上限，创建即暂停只会白丢流量；
+ * 风控改由「事后关停」承担 —— 巡检每小时核验（A8 状态自查 + K1/K2 空耗关停），
+ * 有问题的计划在 1 小时内会被自动暂停并告警。
+ * 需要人工复核时在提交里显式传 initialStatus: 'PAUSED'。
  */
 export type InitialStatus = 'PAUSED' | 'RUNNING';
-export const DEFAULT_INITIAL_STATUS: InitialStatus = 'PAUSED';
+export const DEFAULT_INITIAL_STATUS: InitialStatus = 'RUNNING';
 
 /* ------------------------------------------------------------------
  * 营销目标（campaign.type）

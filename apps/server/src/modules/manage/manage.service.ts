@@ -147,6 +147,20 @@ export class ManageService {
     return items.map((r) => this.normalizeItem('creative', r));
   }
 
+  /** 按 ID 批量回读层级状态：全量 structure 列表在 UAX 账户下会漏掉常规计划（平台列表接口行为），
+   *  一律用带 ids 的精确查询拿投放状态（put_status 1=投放 2=暂停 3=删除） */
+  async listByIds(advertiserId: string, level: ManageLevel, ids: string[]): Promise<StructureItem[]> {
+    if (!ids.length) return [];
+    const take = ids.slice(0, 200);
+    const found =
+      level === 'campaign'
+        ? await this.planApi.listCampaigns(advertiserId, take)
+        : level === 'unit'
+          ? await this.planApi.listUnits(advertiserId, take)
+          : await this.planApi.listCreatives(advertiserId, take);
+    return (found || []).map((r) => this.normalizeItem(level, r));
+  }
+
   private normalizeItem(level: ManageLevel, r: Record<string, unknown>): StructureItem {
     const putStatus = Number(r.put_status ?? 0);
     const base = {
@@ -167,10 +181,12 @@ export class ManageService {
       bidYuan: this.liToYuan(this.num(r.bid) > 0 ? this.num(r.bid) : this.num(r.cpa_bid)),
       bidType: r.bid_type != null ? Number(r.bid_type) : null,
       scheduleTime: (r.schedule_time as string | undefined) ?? null,
-      sceneIds:
-        level === 'unit' && Array.isArray(r.scene_ids)
-          ? (r.scene_ids as unknown[]).map((x) => Number(x))
-          : null,
+      // 注意：组创建入参是 scene_id（单数），列表返回也是 scene_id —— 两者都兼容
+      sceneIds: (() => {
+        if (level !== 'unit') return null;
+        const raw = r.scene_id ?? r.scene_ids;
+        return Array.isArray(raw) ? raw.map((x) => Number(x)) : raw != null ? [Number(raw)] : null;
+      })(),
     };
     return base;
   }

@@ -239,8 +239,10 @@ export default function ShareCard() {
         {!data?.effectiveEnabled && (
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             {data?.enabled
-              ? '已保存但还没重启，重启后下面这些地址才会生效。'
-              : '开启共享并重启后，这里会列出可用的访问地址。'}
+              ? '已保存但还没重启，重启后下面这些地址才会生效（点上方「保存并重启生效」）。'
+              : data?.hasPassword
+                ? '当前开关仍处于关闭状态（仅本机可访问）——口令只是门槛，必须先把上面的开关打开并保存，重启后这里才会列出局域网地址。'
+                : '开启共享并重启后，这里会列出可用的访问地址。'}
           </Typography.Text>
         )}
 

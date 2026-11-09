@@ -32,6 +32,22 @@ export class PlanController {
     return this.assets.listVideos(String(advertiserId ?? ''), force === '1');
   }
 
+  /** 按 photoId 批量核对素材在库情况（素材库共享，跨主题/跑量素材直接按 ID 精确查） */
+  @Post('assets/videos/check')
+  assetVideosCheck(@Body() body: { advertiserId: string; photoIds: string[] }) {
+    return this.assets.checkVideosByIds(String(body.advertiserId ?? ''), body.photoIds ?? []);
+  }
+
+  /** 从源 URL 下载视频并上传到账户素材库（跨户搬运，v2/file/ad/video/upload） */
+  @Post('assets/videos/upload-url')
+  assetVideosUpload(@Body() body: { advertiserId: string; url: string; name: string }) {
+    return this.assets.uploadVideoFromUrl(
+      String(body.advertiserId ?? ''),
+      String(body.url ?? ''),
+      String(body.name ?? ''),
+    );
+  }
+
   /** 账户绑定的应用（应用安装/活跃用） */
   @Get('assets/apps')
   assetApps(@Query('advertiserId') advertiserId: string, @Query('force') force?: string) {

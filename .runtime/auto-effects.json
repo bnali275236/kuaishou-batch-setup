@@ -1,0 +1,287 @@
+{
+ "entries": [
+  {
+   "id": "BUILD-12571358188-1794188700000",
+   "ts": 1794188700000,
+   "date": "2026-11-09",
+   "hour": 9,
+   "kind": "BUILD",
+   "rule": "补录（今日实际创建）",
+   "advertiserId": "124276386",
+   "tag": "386",
+   "objectId": "12571358188",
+   "name": "PZ386-跑量复投-1109",
+   "before": {
+    "charge": 0,
+    "activation": 0,
+    "show": 0,
+    "clicks": 0
+   },
+   "evals": {
+    "h6": {
+     "skipped": false,
+     "dCharge": 12.977,
+     "dAct": 2,
+     "dShow": 4094,
+     "dClicks": 27,
+     "cpaAfter": 6.4885,
+     "cpaBefore": null
+    }
+   },
+   "createdAt": "2026-11-09T09:45:00+08:00"
+  },
+  {
+   "id": "BUILD-12571411014-1794190800000",
+   "ts": 1794190800000,
+   "date": "2026-11-09",
+   "hour": 10,
+   "kind": "BUILD",
+   "rule": "补录（今日实际创建）",
+   "advertiserId": "124276386",
+   "tag": "386",
+   "objectId": "12571411014",
+   "name": "PZ386-跑量-补充",
+   "before": {
+    "charge": 0,
+    "activation": 0,
+    "show": 0,
+    "clicks": 0
+   },
+   "evals": {
+    "h6": {
+     "skipped": false,
+     "dCharge": 0,
+     "dAct": 0,
+     "dShow": 0,
+     "dClicks": 0,
+     "cpaAfter": null,
+     "cpaBefore": null
+    }
+   },
+   "createdAt": "2026-11-09T10:20:00+08:00"
+  },
+  {
+   "id": "BUILD-12571358383-1794188700000",
+   "ts": 1794188700000,
+   "date": "2026-11-09",
+   "hour": 9,
+   "kind": "BUILD",
+   "rule": "补录（今日实际创建）",
+   "advertiserId": "124276387",
+   "tag": "387",
+   "objectId": "12571358383",
+   "name": "PZ387-跑量复投-1109",
+   "before": {
+    "charge": 0,
+    "activation": 0,
+    "show": 0,
+    "clicks": 0
+   },
+   "evals": {
+    "h6": {
+     "skipped": false,
+     "dCharge": 27.693,
+     "dAct": 1,
+     "dShow": 4451,
+     "dClicks": 27,
+     "cpaAfter": 27.693,
+     "cpaBefore": null
+    }
+   },
+   "createdAt": "2026-11-09T09:45:00+08:00"
+  },
+  {
+   "id": "BUILD-12571411124-1794190800000",
+   "ts": 1794190800000,
+   "date": "2026-11-09",
+   "hour": 10,
+   "kind": "BUILD",
+   "rule": "补录（今日实际创建）",
+   "advertiserId": "124276387",
+   "tag": "387",
+   "objectId": "12571411124",
+   "name": "PZ387-跑量-补充",
+   "before": {
+    "charge": 0,
+    "activation": 0,
+    "show": 0,
+    "clicks": 0
+   },
+   "evals": {
+    "h6": {
+     "skipped": false,
+     "dCharge": 0,
+     "dAct": 0,
+     "dShow": 0,
+     "dClicks": 0,
+     "cpaAfter": null,
+     "cpaBefore": null
+    }
+   },
+   "createdAt": "2026-11-09T10:20:00+08:00"
+  },
+  {
+   "id": "BUILD-12571988037-1794192900000",
+   "ts": 1794192900000,
+   "date": "2026-11-09",
+   "hour": 10,
+   "kind": "BUILD",
+   "rule": "补录（今日实际创建）",
+   "advertiserId": "124276386",
+   "tag": "386",
+   "objectId": "12571988037",
+   "name": "PZ386-新素材-1109",
+   "before": {
+    "charge": 0,
+    "activation": 0,
+    "show": 0,
+    "clicks": 0
+   },
+   "evals": {
+    "h6": {
+     "skipped": false,
+     "dCharge": 0.009,
+     "dAct": 0,
+     "dShow": 6,
+     "dClicks": 0,
+     "cpaAfter": null,
+     "cpaBefore": null
+    }
+   },
+   "createdAt": "2026-11-09T10:55:00+08:00"
+  },
+  {
+   "id": "BUILD-12571988258-1794192900000",
+   "ts": 1794192900000,
+   "date": "2026-11-09",
+   "hour": 10,
+   "kind": "BUILD",
+   "rule": "补录（今日实际创建）",
+   "advertiserId": "124276387",
+   "tag": "387",
+   "objectId": "12571988258",
+   "name": "PZ387-新素材-1109",
+   "before": {
+    "charge": 0,
+    "activation": 0,
+    "show": 0,
+    "clicks": 0
+   },
+   "evals": {
+    "h6": {
+     "skipped": false,
+     "dCharge": 0.021,
+     "dAct": 0,
+     "dShow": 0,
+     "dClicks": 0,
+     "cpaAfter": null,
+     "cpaBefore": null
+    }
+   },
+   "createdAt": "2026-11-09T10:55:00+08:00"
+  },
+  {
+   "id": "BUILD-12574930450-1794204720000",
+   "ts": 1794204720000,
+   "date": "2026-11-09",
+   "hour": 14,
+   "kind": "BUILD",
+   "rule": "新素材测新（14:00 自动批）",
+   "advertiserId": "124276386",
+   "tag": "386",
+   "objectId": "12574930450",
+   "name": "PZ386-新素材-1109-2",
+   "before": {
+    "charge": 0,
+    "activation": 0,
+    "show": 0,
+    "clicks": 0
+   },
+   "evals": {},
+   "createdAt": "2026-11-09T14:12:00+08:00"
+  },
+  {
+   "id": "BUILD-12574930707-1794204720000",
+   "ts": 1794204720000,
+   "date": "2026-11-09",
+   "hour": 14,
+   "kind": "BUILD",
+   "rule": "新素材测新（14:00 自动批）",
+   "advertiserId": "124276387",
+   "tag": "387",
+   "objectId": "12574930707",
+   "name": "PZ387-新素材-1109-2",
+   "before": {
+    "charge": 0,
+    "activation": 0,
+    "show": 0,
+    "clicks": 0
+   },
+   "evals": {},
+   "createdAt": "2026-11-09T14:12:00+08:00"
+  },
+  {
+   "id": "BID-44684399820-1794208685403",
+   "ts": 1794208685403,
+   "date": "2026-11-09",
+   "hour": 15,
+   "kind": "BID",
+   "rule": "B1",
+   "advertiserId": "124276387",
+   "tag": "387",
+   "objectId": "44684399820",
+   "name": "PZ387-跑量复投-1109",
+   "before": {
+    "bid": 9,
+    "charge": 6.603,
+    "activation": 0,
+    "show": 955,
+    "clicks": 4
+   },
+   "evals": {},
+   "createdAt": "2026-11-09T07:18:05.403Z"
+  },
+  {
+   "id": "BID-44540097431-1794208685828",
+   "ts": 1794208685828,
+   "date": "2026-11-09",
+   "hour": 15,
+   "kind": "BID",
+   "rule": "B1",
+   "advertiserId": "124276387",
+   "tag": "387",
+   "objectId": "44540097431",
+   "name": "PZ387-跑量-超自然",
+   "before": {
+    "bid": 9,
+    "charge": 4.065,
+    "activation": 1,
+    "show": 76,
+    "clicks": 2
+   },
+   "evals": {},
+   "createdAt": "2026-11-09T07:18:05.828Z"
+  },
+  {
+   "id": "BID-44540097431-1794212395239",
+   "ts": 1794212395239,
+   "date": "2026-11-09",
+   "hour": 16,
+   "kind": "BID",
+   "rule": "B1",
+   "advertiserId": "124276387",
+   "tag": "387",
+   "objectId": "44540097431",
+   "name": "PZ387-跑量-超自然",
+   "before": {
+    "bid": 9,
+    "charge": 4.462,
+    "activation": 1,
+    "show": 107,
+    "clicks": 3
+   },
+   "evals": {},
+   "createdAt": "2026-11-09T08:19:55.239Z"
+  }
+ ]
+}
