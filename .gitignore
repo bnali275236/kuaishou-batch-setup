@@ -50,3 +50,6 @@ apps/electron/resources/web/
 
 # 工作台工具临时目录
 .workbuddy/tmp/
+
+# runtime state (计划名缓存 / 监控日志 / 守护 pid) — 业务运行态，不入库
+.runtime/
