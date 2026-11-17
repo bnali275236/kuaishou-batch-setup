@@ -31,8 +31,8 @@ export default function HotTopicsPage() {
   const { data, isLoading, refetch } = useQuery<HotTopicResult>({
     queryKey: ['hot-topics'],
     queryFn: () => api.get<HotTopicResult>('/api/hot-topics'),
-    // 后端每 10 分钟自动抓一次；前端 5 分钟轮询兜底（页面开着时也能看到更新）
-    refetchInterval: 5 * 60_000,
+    // 后端每天 08:00 自动抓一次；前端 30 分钟轮询兜底（页面开着时能看到当日更新）
+    refetchInterval: 30 * 60_000,
   });
 
   const doRefresh = async () => {
@@ -89,7 +89,7 @@ export default function HotTopicsPage() {
     <div>
       <div className="page-header">
         <h2>实时热点</h2>
-        <p>微博 / 百度 / 头条 / B站 / 知乎热榜聚合，每 10 分钟自动更新，可作素材选题参考</p>
+        <p>微博 / 百度 / 头条 / B站 / 知乎热榜聚合（已过滤时政类），每天 8:00 自动更新，可作素材选题参考</p>
       </div>
 
       <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 12 }}>
