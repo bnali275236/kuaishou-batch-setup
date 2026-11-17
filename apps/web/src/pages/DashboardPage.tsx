@@ -379,7 +379,6 @@ export default function DashboardPage() {
 
   const [selected, setSelected] = useState<string[]>([]);
   const [range, setRange] = useState<[Dayjs, Dayjs]>(() => [dayjs(), dayjs()]);
-  const [granularity, setGranularity] = useState<'DAILY' | 'HOURLY'>('DAILY');
   const [autoRefresh, setAutoRefresh] = useState(false);
 
   const [result, setResult] = useState<OverviewResult | null>(null);
@@ -400,18 +399,17 @@ export default function DashboardPage() {
   // 历史数据已本地永久留存：日期下限看本地库（没积累过就不限），上限只拦未来
   const histMinDate = meta?.earliestDate ? dayjs(meta.earliestDate) : null;
 
-  const paramKey = `${effectiveSelection.join(',')}|${startDate}|${endDate}|${granularity}`;
+  const paramKey = `${effectiveSelection.join(',')}|${startDate}|${endDate}`;
   const paramKeyRef = useRef(paramKey);
   paramKeyRef.current = paramKey;
 
   const fetchData = useCallback(
     async (key: string) => {
-      // 解析参数
-      const [ids, start, end, gran] = [
+      // 解析参数（账户集合 | 开始 | 结束）；粒度固定按天——小时曲线由 /api/report/trend 单独提供
+      const [ids, start, end] = [
         key.split('|')[0] ? key.split('|')[0].split(',').filter(Boolean) : [],
         key.split('|')[1],
         key.split('|')[2],
-        key.split('|')[3] as 'DAILY' | 'HOURLY',
       ];
       if (ids.length === 0) return;
       setLoading(true);
@@ -420,7 +418,7 @@ export default function DashboardPage() {
           advertiserIds: ids,
           startDate: start,
           endDate: end,
-          granularity: gran,
+          granularity: 'DAILY',
         });
         let trendRows: TrendResponse | null = null;
         if (start === end) {
@@ -830,15 +828,6 @@ export default function DashboardPage() {
           />
 
           <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginLeft: 'auto' }}>
-            <Segmented
-              value={granularity}
-              onChange={(v) => setGranularity(v as 'DAILY' | 'HOURLY')}
-              options={[
-                { label: '按天', value: 'DAILY' },
-                { label: '按小时', value: 'HOURLY' },
-              ]}
-            />
-
             <Button
               type="primary"
               icon={<ReloadOutlined />}
