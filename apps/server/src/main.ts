@@ -98,7 +98,6 @@ async function bootstrap(): Promise<void> {
   }
   logger.log(`数据目录：${dataDir}`);
   logger.log(`前端来源已放行：${webOrigin}`);
-  logger.warn('数据库迁移请先执行：npm run db:migrate');
 }
 
 void bootstrap();
