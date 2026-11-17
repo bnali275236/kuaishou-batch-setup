@@ -9,6 +9,7 @@ import {
   Input,
   Modal,
   Pagination,
+  Progress,
   Radio,
   Select,
   Space,
@@ -16,8 +17,15 @@ import {
   Tag,
   Tooltip,
   Typography,
+  message,
 } from 'antd';
-import { HistoryOutlined, QuestionCircleOutlined, SearchOutlined } from '@ant-design/icons';
+import {
+  CloudUploadOutlined,
+  HistoryOutlined,
+  QuestionCircleOutlined,
+  SearchOutlined,
+} from '@ant-design/icons';
+import { explainError, uploadBinary } from '../../api/client';
 
 /**
  * 对照磁力引擎官方「选择素材 / 落地页」弹窗做的轻量复刻。
@@ -232,13 +240,64 @@ export function VideoPickerModal(props: {
   loading?: boolean;
   selected: string[];
   onChange: (ids: string[]) => void;
+  /** 目标账户（本地上传必需）；不传则隐藏上传入口 */
+  advertiserId?: string;
+  /** 上传成功后的回调：父组件用来强制刷新素材列表 */
+  onUploaded?: (photoId: string) => void;
 }) {
-  const { open, onClose, videos, loading, selected, onChange } = props;
+  const { open, onClose, videos, loading, selected, onChange, advertiserId, onUploaded } = props;
   const [keyword, setKeyword] = useState('');
   const [dateRange, setDateRange] = useState<[Dayjs | null, Dayjs | null] | null>(null);
   const [sortBy, setSortBy] = useState<SortKey>('cost7d');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+  const [uploading, setUploading] = useState(false);
+  const [percent, setPercent] = useState(0);
+  const [uploadName, setUploadName] = useState('');
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  /** 本地上传：文件 → 账户素材库，成功后自动勾选并刷新列表 */
+  const handleFile = async (file: File | undefined) => {
+    if (!file) return;
+    if (!advertiserId) {
+      message.warning('请先在表单里选好投放账户，再上传素材');
+      return;
+    }
+    const MAX = 500 * 1024 * 1024;
+    if (file.size > MAX) {
+      message.error(`文件 ${(file.size / 1024 / 1024).toFixed(1)}MB，超过 500MB 上限`);
+      return;
+    }
+    if (!/\.(mp4|mov|webm)$/i.test(file.name)) {
+      message.error('只支持 mp4 / mov / webm 视频文件');
+      return;
+    }
+    setUploading(true);
+    setPercent(0);
+    setUploadName(file.name);
+    try {
+      const name = file.name.replace(/\.[^.]+$/, '').slice(0, 50);
+      const res = await uploadBinary<{ photoId: string; sizeBytes: number }>(
+        `/api/plan/assets/videos/upload?advertiserId=${encodeURIComponent(
+          advertiserId,
+        )}&name=${encodeURIComponent(name)}`,
+        file,
+        {
+          fileName: file.name,
+          onProgress: (p) => setPercent(p.percent),
+        },
+      );
+      message.success(`「${name}」已上传到账户素材库`);
+      if (res.photoId && !selected.includes(res.photoId)) onChange([...selected, res.photoId]);
+      onUploaded?.(res.photoId);
+    } catch (err) {
+      Modal.error({ title: '上传失败', content: explainError(err) });
+    } finally {
+      setUploading(false);
+      setPercent(0);
+      setUploadName('');
+    }
+  };
 
   useEffect(() => {
     if (open) setPage(1);
@@ -335,7 +394,35 @@ export function VideoPickerModal(props: {
             { value: 'uploadTime', label: '按上传时间 新→旧' },
           ]}
         />
+        <input
+          ref={fileRef}
+          type="file"
+          accept="video/mp4,video/quicktime,video/webm"
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            e.currentTarget.value = '';
+            void handleFile(f);
+          }}
+        />
+        <Button
+          icon={<CloudUploadOutlined />}
+          loading={uploading}
+          disabled={!advertiserId}
+          title={advertiserId ? '从本机选择视频，上传到该账户素材库' : '先选投放账户'}
+          onClick={() => fileRef.current?.click()}
+        >
+          {uploading ? '上传中' : '上传本地视频'}
+        </Button>
       </div>
+      {uploading && (
+        <div style={{ marginBottom: 10 }}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            正在上传 {uploadName} 到账户素材库（大文件请勿关闭页面）
+          </Typography.Text>
+          <Progress percent={percent} size="small" status="active" />
+        </div>
+      )}
       <Typography.Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 8 }}>
         消耗来自素材维度实时报表，平台仅开放近 7 天（30 天 / 历史累计需异步报表，暂未接入）；无消耗的素材排在末尾。
       </Typography.Text>

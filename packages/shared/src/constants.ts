@@ -145,6 +145,29 @@ export const MAPI_PATHS = {
    * 旧 APP_LIST 返回空、本接口能拿到共享应用（source_type=2），含 app_id + package_id。
    */
   APP_RELEASE_LIST: '/rest/openapi/gw/dsp/appcenter/app/release/list',
+
+  /* ---------------- 应用中心（应用创建 / 上传 / 发布） ----------------
+   * 与 APP_RELEASE_LIST 同属 appcenter 族，但用途不同：
+   *   release/list  = 给「单元创编」选应用（只读，含共享应用）
+   *   app/*         = 应用中心资产管理（上传 APK → 创建应用 → 审核 → 发布 → 上架）
+   * 官方文档：应用管理 / 应用创编 / 文件上传（appcenter 分组）。
+   */
+  /** 上传 APK 文件（multipart，字段 advertiser_id + file）→ 返回 blob_store_key */
+  APPCENTER_APK_UPLOAD: '/rest/openapi/gw/dsp/appcenter/upload/apk',
+  /** 上传图片（multipart，字段 advertiser_id + type + file）→ 返回 CDN url；type 1=图标 2=应用图片 5=单机承诺函 */
+  APPCENTER_PIC_UPLOAD: '/rest/openapi/gw/dsp/appcenter/upload/pic',
+  /** 【应用中心】应用列表（含审核状态/包 ID，与创编用的 release/list 不同） */
+  APPCENTER_APP_LIST: '/rest/openapi/gw/dsp/appcenter/app/list',
+  /** 创建 Android 应用：app_info + app_privacy_info + package_info(blob_store_key) */
+  APPCENTER_APP_CREATE_ANDROID: '/rest/openapi/gw/dsp/appcenter/app/create/android',
+  /** 创建 iOS 应用：只需 App Store 下载链接（+可选图标） */
+  APPCENTER_APP_CREATE_IOS: '/rest/openapi/gw/dsp/appcenter/app/create/ios',
+  /** 发布应用（审核通过的母包才能发布，发布后 package_id 才能绑定单元） */
+  APPCENTER_APP_RELEASE: '/rest/openapi/gw/dsp/appcenter/app/release',
+  /** 应用上架（应用商店维度） */
+  APPCENTER_APP_ONLINE: '/rest/openapi/gw/dsp/appcenter/app/online',
+  /** 应用下架 */
+  APPCENTER_APP_OFFLINE: '/rest/openapi/gw/dsp/appcenter/app/offline',
   /** 获取原生快手号列表（kol_user_type：1 普通快手号 / 2 服务号达人 / 3 聚星达人） */
   NATIVE_USER_LIST: '/rest/openapi/gw/dsp/v1/native/user/list',
   /**

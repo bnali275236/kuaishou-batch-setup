@@ -4204,6 +4204,8 @@ export function PlanCardMode(props: {
         loading={videosQuery.isLoading}
         selected={selectedVideos}
         onChange={setSelectedVideos}
+        advertiserId={form.advertiserId}
+        onUploaded={() => refreshAssets('videos')}
       />
 
       {/* 落地页选择弹窗（销售线索建站页） */}

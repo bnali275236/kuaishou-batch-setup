@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import dayjs from 'dayjs';
 import { MAPI_PATHS } from '@wkbd/shared';
@@ -112,6 +112,24 @@ export class PlanAssetsService {
     private readonly prisma: PrismaService,
   ) {}
 
+  /**
+   * 写操作前置守卫：代投白名单账户只读。
+   * 「只读」是业务约束（别人的户只给看不给动），必须在服务端拦，
+   * 不能只靠前端藏按钮 —— 局域网共享时前端不是唯一的调用方。
+   */
+  private async assertWritable(advertiserId: string): Promise<void> {
+    if (!advertiserId) throw new BadRequestException('缺少 advertiserId');
+    const locked = await this.prisma.oauthAccount.findFirst({
+      where: { advertiserId, readOnly: true },
+      select: { advertiserId: true },
+    });
+    if (locked) {
+      throw new ForbiddenException(
+        `账户 ${advertiserId} 在「代投白名单」内，禁止写入（上传素材 / 创建应用）`,
+      );
+    }
+  }
+
 
   async listVideos(advertiserId: string, force = false): Promise<AssetItem[]> {
     const videos = await this.load('video', advertiserId, force, () =>
@@ -216,17 +234,31 @@ export class PlanAssetsService {
     url: string,
     name: string,
   ): Promise<{ photoId: string; sizeBytes: number }> {
-    const locked = await this.prisma?.oauthAccount?.findFirst?.({
-      where: { advertiserId, readOnly: true },
-      select: { advertiserId: true },
-    });
-    if (locked) {
-      throw new Error(`账户 ${advertiserId} 在「代投白名单」内，禁止上传素材`);
-    }
+    await this.assertWritable(advertiserId);
     const res = await fetch(url);
     if (!res.ok) throw new Error(`素材下载失败 HTTP ${res.status}`);
     const buffer = Buffer.from(await res.arrayBuffer());
     if (buffer.length < 1024) throw new Error(`素材下载内容过小(${buffer.length}B)，疑似失效链接`);
+    return this.uploadVideoBuffer(advertiserId, buffer, name);
+  }
+
+  /**
+   * 直接把内存里的视频字节上传到账户素材库（本地上传 / 跨户搬运共用）。
+   *
+   * 平台要求先算 md5 再随表单提交（signature），字段：advertiser_id / signature /
+   * photo_name / type(1=信息流竖版) + multipart 的 file。返回 photo_id（19 位，字符串透传）。
+   */
+  async uploadVideoBuffer(
+    advertiserId: string,
+    buffer: Buffer,
+    name: string,
+    fileName = 'video.mp4',
+    contentType = 'video/mp4',
+  ): Promise<{ photoId: string; sizeBytes: number }> {
+    await this.assertWritable(advertiserId);
+    if (buffer.length < 1024) {
+      throw new BadRequestException(`视频内容过小(${buffer.length}B)，请确认选的是视频文件`);
+    }
     const signature = createHash('md5').update(buffer).digest('hex');
     const data = await this.gateway.call<Record<string, unknown>>({
       advertiserId,
@@ -239,7 +271,7 @@ export class PlanAssetsService {
         photo_name: name.slice(0, 50),
         type: 1, // 信息流竖版
       },
-      multipart: { buffer, fileName: 'video.mp4', contentType: 'video/mp4' },
+      multipart: { buffer, fileName, contentType },
       action: 'plan.assets.video_upload',
     });
     const photoId =

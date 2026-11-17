@@ -1,6 +1,7 @@
 import {
   AlertOutlined,
   AppstoreAddOutlined,
+  AppstoreOutlined,
   DashboardOutlined,
   SettingOutlined,
   TeamOutlined,
@@ -14,6 +15,7 @@ import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-
 import { api } from './api/client';
 import ShareGate from './components/ShareGate';
 import AccountsPage from './pages/AccountsPage';
+import AppCenterPage from './pages/AppCenterPage';
 import DashboardPage from './pages/DashboardPage';
 import MaterialBoardPage from './pages/MaterialBoardPage';
 import PlanCreatePage from './pages/PlanCreatePage';
@@ -56,7 +58,7 @@ function Shell() {
 
   const selected = location.pathname.startsWith('/setup')
     ? '/setup'
-    : ['/dashboard', '/materials', '/plan', '/tasks', '/accounts'].find((k) =>
+    : ['/dashboard', '/materials', '/plan', '/appcenter', '/tasks', '/accounts'].find((k) =>
         location.pathname.startsWith(k),
       ) ?? '/dashboard';
   const needReauth = health?.accounts.grantNeedReauth ?? 0;
@@ -66,6 +68,7 @@ function Shell() {
     { key: '/dashboard', icon: <DashboardOutlined />, label: t('dashboard') },
     { key: '/materials', icon: <VideoCameraOutlined />, label: t('materials') },
     { key: '/plan', icon: <AppstoreAddOutlined />, label: t('plan') },
+    { key: '/appcenter', icon: <AppstoreOutlined />, label: t('appcenter') },
     { key: '/tasks', icon: <UnorderedListOutlined />, label: t('tasks') },
     { key: '/accounts', icon: <TeamOutlined />, label: t('accounts') },
   ];
@@ -165,6 +168,7 @@ function Shell() {
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/materials" element={<MaterialBoardPage />} />
               <Route path="/plan" element={<PlanCreatePage />} />
+              <Route path="/appcenter" element={<AppCenterPage />} />
               <Route path="/tasks" element={<TasksPage />} />
               <Route path="/accounts" element={<AccountsPage />} />
               <Route path="/setup" element={<SetupPage />} />

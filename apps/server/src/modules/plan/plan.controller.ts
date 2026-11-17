@@ -1,5 +1,18 @@
-import { Body, Controller, Delete, Get, Param, ParseIntPipe, Post, Put, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  ParseIntPipe,
+  Post,
+  Put,
+  Query,
+  Req,
+} from '@nestjs/common';
+import type { Request } from 'express';
 import { InitialStatus, PlanRow } from '@wkbd/shared';
+import { extOf, readRawBody } from '../../common/raw-body';
 import { DraftService } from './draft.service';
 import { PlanAssetsService } from './plan.assets';
 import { PlanPackagesService } from './plan.packages';
@@ -46,6 +59,37 @@ export class PlanController {
       String(body.url ?? ''),
       String(body.name ?? ''),
     );
+  }
+
+  /**
+   * 本地上传视频到账户素材库（浏览器直传二进制，Content-Type: application/octet-stream）。
+   *
+   * 为什么用裸二进制而不是 multipart：前端 XHR 直传才能拿到上传进度，
+   * 而 500MB 的视频没有进度条等于不可用。文件名字段放 query（URI 编码），
+   * 避免为了一个名字再解析一次表单。
+   */
+  @Post('assets/videos/upload')
+  async assetVideosUploadLocal(
+    @Req() req: Request,
+    @Query('advertiserId') advertiserId: string,
+    @Query('name') name?: string,
+    @Query('fileName') fileName?: string,
+  ) {
+    const MAX_BYTES = 500 * 1024 * 1024;
+    const buffer = await readRawBody(req, MAX_BYTES);
+    const safeName = String(fileName ?? 'video.mp4');
+    const ext = extOf(safeName) || '.mp4';
+    const contentType =
+      ext === '.mov'
+        ? 'video/quicktime'
+        : ext === '.webm'
+          ? 'video/webm'
+          : 'video/mp4';
+    const photoName =
+      String(name ?? '').trim() ||
+      safeName.replace(/\.[^.]+$/, '').slice(0, 50) ||
+      `本地视频${ext}`;
+    return this.assets.uploadVideoBuffer(advertiserId, buffer, photoName, safeName, contentType);
   }
 
   /** 账户绑定的应用（应用安装/活跃用） */

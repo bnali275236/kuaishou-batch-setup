@@ -12,6 +12,7 @@ const DICT = {
   dashboard: '盯盘看板',
   materials: '素材看板',
   plan: '上计划',
+  appcenter: '应用中心',
   tasks: '批量任务',
   accounts: '账户管理',
   settings: '设置',

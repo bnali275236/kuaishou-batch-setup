@@ -57,6 +57,12 @@ vite emptyOutDir 关掉、由 stage.js `pruneUnreferencedAssets()` 清（须扫�
 ## 账户现状
 124276382 已失效（**token 有效 ≠ 账户在授权范围内**）。现用罗盘凭证 #6（LUOPAN+USER）127 账户 ACTIVE。账户名称同步（0.6.2）：`OauthAccount.nameSyncedAt`，回填先补缺失、再刷 >24h 最旧优先；账户行有「刷新名称」按钮（POST /api/oauth/accounts/:id/refresh-name）。
 
+## ✅ 素材本地上传 + 应用中心（2026-11-17）
+- 素材：`POST /api/plan/assets/videos/upload`（**裸二进制** octet-stream，query 带 advertiserId/name/fileName，500MB 上限）+ 前端 `api/client.uploadBinary()`（XHR 进度）。不引 multer，`common/raw-body.ts` 流式读取。入口在「选择素材」弹窗。
+- 应用中心：`/appcenter` 页 + `modules/appcenter`。链路 upload/apk（拿 `blob_store_key`）→ app/create/android（app_info+app_privacy_info+package_info）→ 平台审核 → app/release（发布后 package_id 才可绑单元）→ app/online/offline。
+- ⚠️ `app/list` 的 `list_type` **必填**（省了报 401000「list_type 填写有误」）；「全部」要并发查 1 自有 + 2 共享再按 package_id 去重。资产口径是 `app/list`，创编口径才是 `app/release/list`（只含已发布）。
+- 写操作统一 `assertWritable()`：代投白名单账户禁止上传/创建。
+
 ## 待确认
 告警通道（P2 用）：企微 / 飞书 / 邮件；素材看板 6 个月回溯方案已定未实施。
 

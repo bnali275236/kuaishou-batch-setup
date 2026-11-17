@@ -146,3 +146,84 @@ export const api = {
     request<T>(path, { method: 'PATCH', body: JSON.stringify(body ?? {}) }),
   del: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
 };
+
+/* ------------------------------------------------------------------
+ * 二进制直传（大文件：素材视频 / APK / 图片）
+ *
+ * 为什么不用 fetch：fetch 没有上传进度事件，500MB 的视频没有进度条
+ * 等于不可用。这里用 XHR，把 onprogress 透给调用方画进度。
+ * 请求体是裸字节，所以必须自己设 Content-Type，不能走 api.post 的 JSON。
+ * ------------------------------------------------------------------ */
+
+export interface UploadProgress {
+  loaded: number;
+  total: number;
+  /** 0-100 */
+  percent: number;
+}
+
+export function uploadBinary<T>(
+  path: string,
+  file: Blob,
+  opts: {
+    /** 原始文件名（后端据此判断扩展名/类型） */
+    fileName?: string;
+    contentType?: string;
+    onProgress?: (p: UploadProgress) => void;
+  } = {},
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const qs = new URLSearchParams();
+    if (opts.fileName) qs.set('fileName', opts.fileName);
+    const url = qs.toString() ? `${path}${path.includes('?') ? '&' : '?'}${qs}` : path;
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.setRequestHeader('Content-Type', opts.contentType ?? 'application/octet-stream');
+    const key = getShareKey();
+    if (key) xhr.setRequestHeader('x-wkbd-key', key);
+
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable || !opts.onProgress) return;
+      opts.onProgress({
+        loaded: e.loaded,
+        total: e.total,
+        percent: Math.min(100, Math.round((e.loaded / e.total) * 100)),
+      });
+    };
+
+    xhr.onload = () => {
+      let json: unknown;
+      try {
+        json = xhr.responseText ? JSON.parse(xhr.responseText) : undefined;
+      } catch {
+        json = undefined;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(json as T);
+        return;
+      }
+      const body = json as { message?: unknown; kind?: string; code?: string; mapiCode?: number } | undefined;
+      if (body?.kind === 'SHARE_AUTH' || body?.code === 'SHARE_AUTH_REQUIRED') {
+        clearShareKey();
+        for (const fn of shareAuthListeners) fn();
+      }
+      reject({
+        statusCode: xhr.status,
+        message:
+          typeof body?.message === 'string'
+            ? body.message
+            : `上传失败（HTTP ${xhr.status || '网络中断'}）`,
+        mapiCode: body?.mapiCode,
+        kind: body?.kind,
+        code: body?.code,
+      } satisfies ApiError);
+    };
+
+    xhr.onerror = () =>
+      reject({ statusCode: 0, message: '网络中断，上传失败（检查服务是否还在运行）' } satisfies ApiError);
+
+    xhr.send(file);
+  });
+}
+
