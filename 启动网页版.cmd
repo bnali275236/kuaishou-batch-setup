@@ -4,10 +4,13 @@ rem  Kuaishou Ads Workbench - Web Mode launcher
 rem  Double-click to start. Then open http://127.0.0.1:7801
 rem
 rem  This window = service + built-in watchdog.
-rem  Keep it open (minimizing is fine). Close it to stop.
+rem  It HIDES ITSELF a couple of seconds after the service is
+rem  ready, and the service keeps running in the background.
+rem  To stop the service: double-click the "stop" cmd file
+rem  in this folder (stop web mode).
 rem  If the service crashes, it restarts automatically.
-rem  If another instance is already running, this window takes
-rem  over and the old one yields, so double-click always works.
+rem  If another instance is already running, this window just
+rem  opens the browser and closes itself.
 rem
 rem  NOTE: keep this file pure ASCII + CRLF line endings.
 rem        Chinese in .cmd breaks under GBK console.

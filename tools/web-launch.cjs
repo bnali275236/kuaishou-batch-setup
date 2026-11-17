@@ -15,10 +15,11 @@
  *   4. 日志：.runtime/launcher.log，便于事后查「什么时候掉的、为什么掉的」。
  *
  * 用法：node tools/web-launch.cjs（或双击仓库根目录 启动网页版.cmd）
- *   服务已在运行 → 自动打开浏览器，本窗口随即退出（不会弹黑框停留）
- *   服务未在运行 → 启动服务，就绪后自动打开浏览器
+ *   双击后：本窗口把服务转交给「无窗口」后台进程，随即自己关闭 → 自动打开浏览器
+ *   服务已在运行 → 直接打开浏览器，窗口立即关闭（不会重复启动）
  *   加 --open 参数：纯「打开网页」语义，服务没跑就顺带启动（打开工作台.cmd）
- *   关闭窗口 / Ctrl+C 才会真正停止服务。
+ *   加 --keep-console 参数：保留黑窗口，排查问题时看实时日志用
+ *   停止服务：双击「停止网页版.cmd」（窗口已隐藏，没有窗口可关）
  */
 const path = require('path');
 const fs = require('fs');
@@ -44,6 +45,13 @@ process.env.DATABASE_URL = `file:${path.join(dataDir, 'app.db').replace(/\\/g, '
 const PORT = Number(process.env.PORT);
 const RUNTIME = path.join(root, '.runtime');
 const URL = `http://127.0.0.1:${PORT}`;
+const WINDOW_TITLE = 'Kuaishou Workbench - Web';
+// 让控制台窗口标题固定，隐藏窗口时按标题找得到它
+try {
+  process.title = WINDOW_TITLE;
+} catch {
+  /* ignore */
+}
 
 /** 用系统默认浏览器打开页面（fire-and-forget，失败不影响服务） */
 function openBrowser(url) {
@@ -56,6 +64,27 @@ function openBrowser(url) {
     c.on('error', () => {});
     c.unref();
     return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 后台化启动：把「服务 + 守护」交给一个窗口不可见的 node 进程，本进程随即退出。
+ * 原理：用 Windows PowerShell 的 Start-Process -WindowStyle Hidden 再起一份本脚本
+ * （带 --hidden 标记），新进程的控制台窗口「创建即隐藏」，用户看不到黑框，
+ * 服务照常在后台跑。不用 Add-Type / wscript，规避安全策略黑名单。
+ */
+function relaunchHidden() {
+  const esc = (s) => String(s).replace(/'/g, "''");
+  const ps = `Start-Process -FilePath '${esc(process.execPath)}' -ArgumentList '${esc(__filename)}','--hidden' -WindowStyle Hidden`;
+  try {
+    const r = spawnSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', ps],
+      { windowsHide: true, timeout: 30000, stdio: 'ignore', env: { ...process.env, KUAISHOU_HIDDEN: '1' } }
+    );
+    return r.status === 0;
   } catch {
     return false;
   }
@@ -193,22 +222,11 @@ async function takeOverPort() {
 
 /* ---------------- 主流程 ---------------- */
 
-// 1) 迁移（幂等）：升级后新增字段/表必须先补，否则 Prisma 查询会报表不存在
-console.log('[1/3] 应用数据库迁移...');
-const prismaCli = path.join(root, 'node_modules', 'prisma', 'build', 'index.js');
-const schema = path.join(serverDir, 'prisma', 'schema.prisma');
-const mig = spawnSync(process.execPath, [prismaCli, 'migrate', 'deploy', '--schema', schema], {
-  cwd: serverDir,
-  env: process.env,
-  stdio: 'inherit',
-});
-if (mig.status !== 0) {
-  console.error('[错误] 数据库迁移失败，请把上方报错截图发给管理员。');
-  process.exit(1);
-}
-
-// 2) 端口接管 / --open 快捷打开
 const OPEN_ONLY = process.argv.includes('--open');
+// 后台化标记：由 relaunchHidden() 拉起的隐藏进程会带上它，避免无限自我重启
+const HIDDEN_CHILD = process.argv.includes('--hidden') || process.env.KUAISHOU_HIDDEN === '1';
+// 加 --keep-console（或环境变量 KUAISHOU_KEEP_CONSOLE=1）可保留黑窗口，便于排查问题
+const KEEP_CONSOLE = process.argv.includes('--keep-console') || process.env.KUAISHOU_KEEP_CONSOLE === '1';
 let browserOpened = false;
 
 (async () => {
@@ -221,6 +239,33 @@ let browserOpened = false;
       process.exit(0);
     }
     console.log('服务尚未启动，正在为您启动（就绪后会自动打开浏览器）...');
+  }
+
+  // 0) 后台化：双击启动时把「服务 + 守护」交给无窗口进程，本窗口立即退场
+  if (!HIDDEN_CHILD && !KEEP_CONSOLE) {
+    console.log('正在转入后台运行（本窗口即将自动关闭）...');
+    if (relaunchHidden()) {
+      console.log('      已转交后台进程，服务就绪后会自动打开浏览器');
+      await sleep(400);
+      process.exit(0);
+    }
+    console.log('      [提示] 转入后台失败，本窗口将保留为服务窗口（不影响使用）');
+  }
+
+  // 1) 迁移（幂等）：升级后新增字段/表必须先补，否则 Prisma 查询会报表不存在
+  console.log('[1/3] 应用数据库迁移...');
+  const prismaCli = path.join(root, 'node_modules', 'prisma', 'build', 'index.js');
+  const schema = path.join(serverDir, 'prisma', 'schema.prisma');
+  const mig = spawnSync(process.execPath, [prismaCli, 'migrate', 'deploy', '--schema', schema], {
+    cwd: serverDir,
+    env: process.env,
+    stdio: 'inherit',
+  });
+  if (mig.status !== 0) {
+    console.error('[错误] 数据库迁移失败，请把上方报错截图发给管理员。');
+    log('[错误] 数据库迁移失败，服务未启动（详见上方输出 / .runtime/launcher.log）');
+    await sleep(8000);
+    process.exit(1);
   }
 
   console.log(`[2/3] 检查端口 ${PORT}...`);
@@ -245,10 +290,10 @@ let browserOpened = false;
     /* ignore */
   }
 
-  console.log('[3/3] 启动服务（本窗口 = 服务 + 守护，请保持开启）...');
+  console.log('[3/3] 启动服务（后台运行，窗口会在就绪后消失）...');
   console.log('      浏览器访问 ' + URL);
   console.log('      数据目录 ' + dataDir);
-  console.log('      就绪后会自动打开浏览器；关闭本窗口即停止服务');
+  console.log('      就绪后会自动打开浏览器；停止服务请双击「停止网页版.cmd」');
   console.log('');
   log(`启动器就绪 pid=${process.pid}，接管端口 ${PORT}`);
 
@@ -256,7 +301,7 @@ let browserOpened = false;
   waitHealthyAndOpen();
 })();
 
-/** 由本窗口拉起的服务：等它就绪后自动打开浏览器（只开一次） */
+/** 服务就绪后自动打开浏览器（只开一次） */
 async function waitHealthyAndOpen() {
   for (let i = 0; i < 60; i++) {
     await sleep(1000);
