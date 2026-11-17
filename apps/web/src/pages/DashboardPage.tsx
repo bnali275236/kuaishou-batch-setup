@@ -1,5 +1,12 @@
-import { QuestionCircleOutlined, ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons';
-import { Alert, App, Button, Card, DatePicker, Empty, Segmented, Select, Space, Table, Tooltip, Typography } from 'antd';
+import {
+  DownOutlined,
+  QuestionCircleOutlined,
+  ReloadOutlined,
+  SearchOutlined,
+  ThunderboltOutlined,
+  UpOutlined,
+} from '@ant-design/icons';
+import { Alert, App, Button, Card, DatePicker, Empty, Input, Segmented, Select, Space, Table, Tooltip, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs, { Dayjs } from 'dayjs';
 import ReactECharts from 'echarts-for-react';
@@ -37,6 +44,10 @@ interface OverviewAccountRow {
   accountName: string | null;
   charge: number;
   show: number;
+  /** 行为数（点击）原始计数；旧缓存可能没有，用 actionRatio×show 兜底 */
+  bclick?: number;
+  /** 转化数原始计数；旧缓存没有时用 conversionRatio×bclick 兜底 */
+  conversionNum?: number;
   impression1kCost: number;
   photoClickRatio: number;
   actionRatio: number;
@@ -111,6 +122,75 @@ interface ReportMeta {
 const fmtMoney = (n: number) => n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtInt = (n: number) => Math.round(n).toLocaleString('zh-CN');
 const fmtPct = (n: number) => `${(n * 100).toFixed(2)}%`;
+
+const EMPTY_TOTALS: OverviewTotals = {
+  charge: 0,
+  show: 0,
+  photoClick: 0,
+  bclick: 0,
+  photoClickRatio: 0,
+  actionRatio: 0,
+  impression1kCost: 0,
+  photoClickCost: 0,
+  actionCost: 0,
+  conversionNum: 0,
+  conversionRatio: 0,
+  activation: 0,
+  activationCost: 0,
+  registerCount: 0,
+  registerCost: 0,
+  payCount: 0,
+  payCost: 0,
+  payFirstDayCount: 0,
+  payFirstDayCost: 0,
+};
+
+/**
+ * 按「当前筛出来的账户行」重算页面顶部汇总。
+ * 口径与后端 deriveSummary 一致：计数直接相加，比率/成本一律用原始计数重算
+ * （绝不对各账户的比率做算术平均，否则小账户会把大盘拉偏）。
+ */
+function sumTotals(rows: OverviewAccountRow[]): OverviewTotals {
+  let charge = 0;
+  let show = 0;
+  let bclick = 0;
+  let conversionNum = 0;
+  let activation = 0;
+  let registerCount = 0;
+  let payCount = 0;
+  let payFirstDayCount = 0;
+  for (const r of rows) {
+    charge += r.charge;
+    show += r.show;
+    const b = typeof r.bclick === 'number' ? r.bclick : r.actionRatio * r.show;
+    const c = typeof r.conversionNum === 'number' ? r.conversionNum : r.conversionRatio * b;
+    bclick += b;
+    conversionNum += c;
+    activation += r.activation;
+    registerCount += r.registerCount;
+    payCount += r.payCount;
+    payFirstDayCount += r.payFirstDayCount;
+  }
+  const div = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 100) / 100 : 0);
+  return {
+    ...EMPTY_TOTALS,
+    charge,
+    show,
+    bclick,
+    conversionNum,
+    actionRatio: show > 0 ? bclick / show : 0,
+    impression1kCost: show > 0 ? Math.round((charge / show) * 1000 * 100) / 100 : 0,
+    conversionRatio: bclick > 0 ? conversionNum / bclick : 0,
+    activation,
+    activationCost: div(charge, activation),
+    registerCount,
+    registerCost: div(charge, registerCount),
+    payCount,
+    payCost: div(charge, payCount),
+    payFirstDayCount,
+    payFirstDayCost: div(charge, payFirstDayCount),
+  };
+}
 
 /* ------------------------------------------------------------------
  * 分时趋势可选指标（与上方核心指标同一套口径）
@@ -218,6 +298,10 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(false);
   /** 下钻抽屉：非空 = 正在查看该账户的 计划/组/创意 层级 */
   const [drill, setDrill] = useState<string | null>(null);
+  /** 账户明细关键字：空 = 全部；否则按「账户名 / 账户 ID」模糊匹配，汇总随之重算 */
+  const [keyword, setKeyword] = useState('');
+  /** 分时走势是否收起（大屏盯盘时可让明细表上移） */
+  const [chartCollapsed, setChartCollapsed] = useState(false);
 
   // 默认全选可用账户
   const effectiveSelection = selected.length > 0 ? selected : usable.map((a) => a.advertiserId);
@@ -550,6 +634,22 @@ export default function DashboardPage() {
     ? trend?.some((r) => r.charge > 0 || r.show > 0) ?? false
     : (result?.daily?.length ?? 0) > 0;
 
+  /* —— 关键字筛选：只影响「明细表 + 顶部汇总」，走势图仍是所选账户合计 —— */
+  const keywordTrim = keyword.trim().toLowerCase();
+  const filteredAccounts = useMemo(() => {
+    const rows = result?.accounts ?? [];
+    if (!keywordTrim) return rows;
+    return rows.filter(
+      (a) => (a.accountName ?? '').toLowerCase().includes(keywordTrim) || a.advertiserId.includes(keywordTrim),
+    );
+  }, [result, keywordTrim]);
+
+  /** 顶部汇总：有筛选就用筛选后的账户重算，无筛选直接用后端算好的合计 */
+  const viewTotals = useMemo<OverviewTotals>(() => {
+    if (!keywordTrim) return result?.totals ?? EMPTY_TOTALS;
+    return sumTotals(filteredAccounts);
+  }, [keywordTrim, result, filteredAccounts]);
+
   /* —— 6 个月历史异步回补：进度提示 + 手动加速 —— */
   const [backfilling, setBackfilling] = useState(false);
   const runBackfill = async () => {
@@ -689,27 +789,27 @@ export default function DashboardPage() {
       {result && (
         <>
           <div className="metric-grid">
-            <MetricCard label="消耗" value={fmtMoney(result.totals.charge)} unit="元" />
+            <MetricCard label="消耗" value={fmtMoney(viewTotals.charge)} unit="元" />
             <MetricCard
               label="千展"
               tip="消耗 ÷ 展示数 × 1000。展示数取素材曝光数（aclick），与点击率同一分母"
-              value={result.totals.impression1kCost > 0 ? fmtMoney(result.totals.impression1kCost) : '—'}
-              unit={result.totals.impression1kCost > 0 ? '元' : undefined}
+              value={viewTotals.impression1kCost > 0 ? fmtMoney(viewTotals.impression1kCost) : '—'}
+              unit={viewTotals.impression1kCost > 0 ? '元' : undefined}
             />
             <MetricCard
               label="点击率"
               tip="行为数 ÷ 展示数（素材曝光数 aclick）。快手把「点击」称为行为数；封面点击率是另一个指标"
-              value={result.totals.actionRatio > 0 ? fmtPct(result.totals.actionRatio) : '—'}
+              value={viewTotals.actionRatio > 0 ? fmtPct(viewTotals.actionRatio) : '—'}
             />
-            <MetricCard label="转化率" value={result.totals.conversionRatio > 0 ? fmtPct(result.totals.conversionRatio) : '—'} />
-            <MetricCard label="激活数" value={result.totals.activation > 0 ? fmtInt(result.totals.activation) : '—'} />
-            <MetricCard label="激活成本" value={result.totals.activationCost > 0 ? fmtMoney(result.totals.activationCost) : '—'} unit={result.totals.activationCost > 0 ? '元' : undefined} />
-            <MetricCard label="注册数" value={result.totals.registerCount > 0 ? fmtInt(result.totals.registerCount) : '—'} />
-            <MetricCard label="注册成本" value={result.totals.registerCost > 0 ? fmtMoney(result.totals.registerCost) : '—'} unit={result.totals.registerCost > 0 ? '元' : undefined} />
-            <MetricCard label="付费次数" value={result.totals.payCount > 0 ? fmtInt(result.totals.payCount) : '—'} />
-            <MetricCard label="付费成本" value={result.totals.payCost > 0 ? fmtMoney(result.totals.payCost) : '—'} unit={result.totals.payCost > 0 ? '元' : undefined} />
-            <MetricCard label="首日付费次数" value={result.totals.payFirstDayCount > 0 ? fmtInt(result.totals.payFirstDayCount) : '—'} />
-            <MetricCard label="首日付费成本" value={result.totals.payFirstDayCost > 0 ? fmtMoney(result.totals.payFirstDayCost) : '—'} unit={result.totals.payFirstDayCost > 0 ? '元' : undefined} />
+            <MetricCard label="转化率" value={viewTotals.conversionRatio > 0 ? fmtPct(viewTotals.conversionRatio) : '—'} />
+            <MetricCard label="激活数" value={viewTotals.activation > 0 ? fmtInt(viewTotals.activation) : '—'} />
+            <MetricCard label="激活成本" value={viewTotals.activationCost > 0 ? fmtMoney(viewTotals.activationCost) : '—'} unit={viewTotals.activationCost > 0 ? '元' : undefined} />
+            <MetricCard label="注册数" value={viewTotals.registerCount > 0 ? fmtInt(viewTotals.registerCount) : '—'} />
+            <MetricCard label="注册成本" value={viewTotals.registerCost > 0 ? fmtMoney(viewTotals.registerCost) : '—'} unit={viewTotals.registerCost > 0 ? '元' : undefined} />
+            <MetricCard label="付费次数" value={viewTotals.payCount > 0 ? fmtInt(viewTotals.payCount) : '—'} />
+            <MetricCard label="付费成本" value={viewTotals.payCost > 0 ? fmtMoney(viewTotals.payCost) : '—'} unit={viewTotals.payCost > 0 ? '元' : undefined} />
+            <MetricCard label="首日付费次数" value={viewTotals.payFirstDayCount > 0 ? fmtInt(viewTotals.payFirstDayCount) : '—'} />
+            <MetricCard label="首日付费成本" value={viewTotals.payFirstDayCost > 0 ? fmtMoney(viewTotals.payFirstDayCost) : '—'} unit={viewTotals.payFirstDayCost > 0 ? '元' : undefined} />
           </div>
 
           {showChart && (
@@ -721,6 +821,7 @@ export default function DashboardPage() {
                   <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 'normal', marginLeft: 8 }}>
                     {range[0].format('YYYY-MM-DD')}
                     {isSingleDay ? '' : ` ~ ${range[1].format('YYYY-MM-DD')}`}
+                    {keywordTrim ? ' · 走势为所选账户合计，不随搜索变化' : ''}
                   </Typography.Text>
                 </span>
               }
@@ -742,29 +843,71 @@ export default function DashboardPage() {
                     onChange={setLineMetric}
                     options={TREND_METRICS.map((m) => ({ value: m.key, label: m.label }))}
                   />
+                  <Tooltip title={chartCollapsed ? '展开走势图' : '收起走势图'}>
+                    <Button
+                      size="small"
+                      type="text"
+                      aria-label={chartCollapsed ? '展开走势图' : '收起走势图'}
+                      icon={chartCollapsed ? <DownOutlined /> : <UpOutlined />}
+                      onClick={() => setChartCollapsed((v) => !v)}
+                    />
+                  </Tooltip>
                 </Space>
               }
             >
-              <ReactECharts option={trendOption} style={{ height: 340 }} notMerge />
+              {!chartCollapsed && <ReactECharts option={trendOption} style={{ height: 340 }} notMerge />}
             </Card>
           )}
 
           <Card
             size="small"
-            title={`账户明细（${result.accounts.length} 个）—— 点击「进入账户」查看计划/组/创意并调整`}
-            extra={board.toolbar}
+            title={
+              <span>
+                账户明细（
+                {keywordTrim ? `${filteredAccounts.length} / ${result.accounts.length}` : result.accounts.length} 个）
+                <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 'normal' }}>
+                  {' '}
+                  —— 点击「进入账户」查看计划/组/创意并调整
+                </Typography.Text>
+              </span>
+            }
+            extra={
+              <Space size={8} wrap>
+                <Input
+                  allowClear
+                  size="small"
+                  style={{ width: 210 }}
+                  prefix={<SearchOutlined style={{ color: '#B8B5AC' }} />}
+                  placeholder="搜索账户名 / 账户 ID"
+                  value={keyword}
+                  onChange={(e) => setKeyword(e.target.value)}
+                />
+                {board.toolbar}
+              </Space>
+            }
           >
             <Table<OverviewAccountRow>
               rowKey="advertiserId"
               size="small"
               columns={board.columns}
               components={board.tableComponents}
-              dataSource={result.accounts}
+              dataSource={filteredAccounts}
               pagination={false}
               scroll={{ x: 1560 }}
+              locale={{
+                emptyText: keywordTrim ? (
+                  <Empty
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    description={`没有匹配「${keyword.trim()}」的账户`}
+                  />
+                ) : (
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有账户数据" />
+                ),
+              }}
               footer={() => (
                 <span style={{ fontSize: 12, color: '#888780' }}>
                   数据获取时间：{dayjs(cache?.savedAt ?? result.fetchedAt).format('YYYY-MM-DD HH:mm:ss')}
+                  {keywordTrim && ` · 顶部汇总为筛选后 ${filteredAccounts.length} 个账户的合计`}
                 </span>
               )}
             />

@@ -100,6 +100,10 @@ export interface OverviewResult {
     accountName: string | null;
     charge: number;
     show: number;
+    /** 行为数（点击数）原始计数 —— 前端筛选账户后重算汇总用 */
+    bclick: number;
+    /** 转化数原始计数 */
+    conversionNum: number;
     impression1kCost: number;
     photoClickRatio: number;
     conversionRatio: number;
@@ -382,13 +386,16 @@ export class ReportService {
         accountName: r.accountName,
       };
       if (!r.acc) {
-        return { ...base, charge: 0, show: 0, impression1kCost: 0, photoClickRatio: 0, actionRatio: 0, conversionRatio: 0, activation: 0, activationCost: 0, registerCount: 0, registerCost: 0, payCount: 0, payCost: 0, payFirstDayCount: 0, payFirstDayCost: 0, missingDays: 0, error: (r as { error?: string }).error };
+        return { ...base, charge: 0, show: 0, bclick: 0, conversionNum: 0, impression1kCost: 0, photoClickRatio: 0, actionRatio: 0, conversionRatio: 0, activation: 0, activationCost: 0, registerCount: 0, registerCost: 0, payCount: 0, payCost: 0, payFirstDayCount: 0, payFirstDayCost: 0, missingDays: 0, error: (r as { error?: string }).error };
       }
       const s = this.deriveSummary(r.acc);
       return {
         ...base,
         charge: s.charge,
         show: s.show,
+        // 原始计数：前端按关键字筛选账户后需要用它们重算汇总，比率不能做算术平均
+        bclick: s.bclick,
+        conversionNum: s.conversionNum,
         impression1kCost: s.impression1kCost,
         photoClickRatio: s.photoClickRatio,
         actionRatio: s.actionRatio,
