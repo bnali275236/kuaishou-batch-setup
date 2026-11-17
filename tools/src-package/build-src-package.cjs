@@ -40,6 +40,7 @@ const EXCLUDE_DIR_NAMES = new Set([
 const EXCLUDE_REL = new Set([
   'apps/electron/resources/server', // stage.js 生成的 staging 后端
   'apps/electron/resources/web', // stage.js 生成的 staging 前端
+  'tools/node', // 本地 node.exe 兜底（87MB 二进制，换机各自放）
   '.workbuddy/tmp', // 大量临时截图 / 浏览器 profile
 ]);
 

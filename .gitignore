@@ -53,3 +53,6 @@ apps/electron/resources/web/
 
 # runtime state (计划名缓存 / 监控日志 / 守护 pid) — 业务运行态，不入库
 .runtime/
+
+# bundled node.exe for the web launcher (87MB, machine-local)
+tools/node/
