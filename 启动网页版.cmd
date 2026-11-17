@@ -37,11 +37,13 @@ echo [INFO] Node: %NODE_EXE%
 "%NODE_EXE%" --version
 echo.
 "%NODE_EXE%" tools\web-launch.cjs
-
+set "RC=%ERRORLEVEL%"
 echo.
-echo [INFO] Service stopped. You can close this window.
-pause
-exit /b 0
+if not "%RC%"=="0" (
+  echo [INFO] Service stopped or an error occurred. You can close this window.
+  pause
+)
+exit /b %RC%
 
 :nonode
 echo [ERR] Node.js not found. Tried: PATH, tools\node, Program Files, LOCALAPPDATA, .workbuddy.
