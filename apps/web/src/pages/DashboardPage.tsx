@@ -82,6 +82,12 @@ interface TrendRow {
   photoClickCost?: number;
 }
 
+/** /api/report/trend 返回：hours = 全部账户合计；byAccount = 每账户各自的小时序列（筛选后现场聚合用） */
+interface TrendResponse {
+  hours: TrendRow[];
+  byAccount?: Record<string, TrendRow[]>;
+}
+
 interface OverviewResult {
   totals: OverviewTotals;
   accounts: OverviewAccountRow[];
@@ -97,6 +103,21 @@ interface OverviewResult {
     payCount: number;
     payFirstDayCount: number;
   }>;
+  /** 每账户按天原始计数（key = advertiserId）—— 关键字筛选后现场聚合走势图 */
+  series?: Record<
+    string,
+    Array<{
+      statDate: string;
+      charge: number;
+      show: number;
+      bclick: number;
+      conversionNum: number;
+      activation: number;
+      registerCount: number;
+      payCount: number;
+      payFirstDayCount: number;
+    }>
+  >;
   fetchedAt: string;
   range: { startDate: string; endDate: string; granularity: 'DAILY' | 'HOURLY' };
 }
@@ -192,6 +213,66 @@ function sumTotals(rows: OverviewAccountRow[]): OverviewTotals {
   };
 }
 
+/**
+ * 把多份走势行按小时/日期合并成一条曲线（原始计数相加，比率/成本由指标函数现算）。
+ * 用于关键字筛选后：只把筛选中账户的每账户序列喂进来，走势即随筛选实时变化。
+ * groups 里允许出现 undefined（账户在序列里没有数据行），直接跳过。
+ */
+function aggregateTrend(groups: Array<TrendRow[] | undefined | null>): TrendRow[] {
+  type Acc2 = Required<Pick<TrendRow, 'charge' | 'show' | 'bclick' | 'conversionNum' | 'activation' | 'registerCount' | 'payCount' | 'payFirstDayCount'>> & {
+    hour?: number;
+    statDate?: string;
+  };
+  const blank = (): Omit<Acc2, 'hour' | 'statDate'> => ({
+    charge: 0,
+    show: 0,
+    bclick: 0,
+    conversionNum: 0,
+    activation: 0,
+    registerCount: 0,
+    payCount: 0,
+    payFirstDayCount: 0,
+  });
+  const map = new Map<string, Acc2>();
+  for (const rows of groups) {
+    if (!Array.isArray(rows)) continue;
+    for (const r of rows) {
+      const key = r.hour !== undefined ? `h${r.hour}` : `d${r.statDate}`;
+      const b = map.get(key) ?? {
+        ...(r.hour !== undefined ? { hour: r.hour } : { statDate: r.statDate ?? '' }),
+        ...blank(),
+      };
+      b.charge += r.charge;
+      b.show += r.show;
+      b.bclick += r.bclick;
+      b.conversionNum += r.conversionNum;
+      b.activation += r.activation;
+      b.registerCount += r.registerCount;
+      b.payCount += r.payCount;
+      b.payFirstDayCount += r.payFirstDayCount;
+      map.set(key, b);
+    }
+  }
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  return [...map.values()]
+    .sort((a, b) =>
+      a.hour !== undefined && b.hour !== undefined
+        ? a.hour - b.hour
+        : (a.statDate ?? '').localeCompare(b.statDate ?? ''),
+    )
+    .map((b) => ({
+      ...(b.hour !== undefined ? { hour: b.hour } : { statDate: b.statDate }),
+      charge: r2(b.charge),
+      show: b.show,
+      bclick: b.bclick,
+      conversionNum: b.conversionNum,
+      activation: b.activation,
+      registerCount: b.registerCount,
+      payCount: b.payCount,
+      payFirstDayCount: b.payFirstDayCount,
+    }));
+}
+
 /* ------------------------------------------------------------------
  * 分时趋势可选指标（与上方核心指标同一套口径）
  * 官方字段字典核实（2026-09，广告主数据文档）：
@@ -239,11 +320,12 @@ const trendMetricOf = (key: TrendMetricKey) => TREND_METRICS.find((m) => m.key =
  * 本地缓存：切走再切回、切历史日期都直接展示上次数据；
  * 「拉取数据」按钮才强制重新请求，新参数没有缓存时自动拉一次
  * ------------------------------------------------------------------ */
-const CACHE_KEY = 'wkbd_dash_cache_v1';
+const CACHE_KEY = 'wkbd_dash_cache_v2';
 
 interface CacheEntry {
   result: OverviewResult;
-  trend: TrendRow[] | null;
+  /** 单日小时走势（hours = 合计；byAccount = 每账户明细，筛选后现场聚合） */
+  trend: TrendResponse | null;
   savedAt: string;
 }
 
@@ -262,12 +344,19 @@ function writeCache(key: string, entry: CacheEntry): void {
   try {
     const map = readCache();
     map[key] = entry;
-    // 只保留最近 60 份，防止无限膨胀
+    // 只保留最近 40 份，防止无限膨胀（每份含每账户序列，比旧版大）
     const keys = Object.keys(map);
-    if (keys.length > 60) {
-      for (const k of keys.slice(0, keys.length - 60)) delete map[k];
+    if (keys.length > 40) {
+      for (const k of keys.slice(0, keys.length - 40)) delete map[k];
     }
-    localStorage.setItem(CACHE_KEY, JSON.stringify(map));
+    try {
+      localStorage.setItem(CACHE_KEY, JSON.stringify(map));
+    } catch {
+      // 配额超限：淘汰最旧一半再试一次；仍失败则放弃缓存（不影响页面数据）
+      const ks = Object.keys(map);
+      for (const k of ks.slice(0, Math.ceil(ks.length / 2))) delete map[k];
+      localStorage.setItem(CACHE_KEY, JSON.stringify(map));
+    }
   } catch {
     /* ignore */
   }
@@ -294,7 +383,7 @@ export default function DashboardPage() {
   const [autoRefresh, setAutoRefresh] = useState(false);
 
   const [result, setResult] = useState<OverviewResult | null>(null);
-  const [trend, setTrend] = useState<TrendRow[] | null>(null);
+  const [trend, setTrend] = useState<TrendResponse | null>(null);
   const [loading, setLoading] = useState(false);
   /** 下钻抽屉：非空 = 正在查看该账户的 计划/组/创意 层级 */
   const [drill, setDrill] = useState<string | null>(null);
@@ -333,11 +422,11 @@ export default function DashboardPage() {
           endDate: end,
           granularity: gran,
         });
-        let trendRows: TrendRow[] | null = null;
+        let trendRows: TrendResponse | null = null;
         if (start === end) {
           // 单日：小时走势实时查；多天区间不再请求小时数据 —— 走势图直接用 overview.daily（按天横坐标）
           trendRows = await api
-            .post<TrendRow[]>('/api/report/trend', { advertiserIds: ids, date: start })
+            .post<TrendResponse>('/api/report/trend', { advertiserIds: ids, date: start })
             .catch(() => null);
         }
         if (paramKeyRef.current !== key) return; // 参数已变，丢弃过期响应
@@ -384,21 +473,44 @@ export default function DashboardPage() {
   const [barMetric, setBarMetric] = useState<TrendMetricKey>('charge');
   const [lineMetric, setLineMetric] = useState<TrendMetricKey>('payCount');
 
-  /** 图表数据源：单日 = 小时行（HH:00 横坐标）；多天 = overview.daily（MM-DD 横坐标），始终有图 */
+  /* —— 关键字筛选：影响「明细表 + 顶部汇总 + 走势图」，全部同源重算 —— */
+  const keywordTrim = keyword.trim().toLowerCase();
+  const filteredAccounts = useMemo(() => {
+    const rows = result?.accounts ?? [];
+    if (!keywordTrim) return rows;
+    return rows.filter(
+      (a) => (a.accountName ?? '').toLowerCase().includes(keywordTrim) || a.advertiserId.includes(keywordTrim),
+    );
+  }, [result, keywordTrim]);
+
+  /**
+   * 图表数据源：单日 = 小时行（HH:00 横坐标）；多天 = overview.daily（MM-DD 横坐标），始终有图。
+   * 有关键字筛选时：改用「筛选后账户」各自的序列现场聚合（与顶部汇总同源），走势随筛选实时变化。
+   */
   const chartRows = useMemo<TrendRow[]>(() => {
-    if (isSingleDay) return trend ?? [];
-    return (result?.daily ?? []).map((d) => ({
-      statDate: d.statDate,
-      charge: d.charge,
-      show: d.show,
-      bclick: d.bclick,
-      conversionNum: d.conversionNum,
-      activation: d.activation,
-      registerCount: d.registerCount,
-      payCount: d.payCount,
-      payFirstDayCount: d.payFirstDayCount,
-    }));
-  }, [isSingleDay, trend, result]);
+    const useFiltered = !!keywordTrim;
+    if (isSingleDay) {
+      const t = trend;
+      if (!t) return [];
+      if (!useFiltered || !t.byAccount) return t.hours;
+      return aggregateTrend(filteredAccounts.map((a) => t.byAccount?.[a.advertiserId]));
+    }
+    const daily = result?.daily ?? [];
+    if (!useFiltered || !result?.series) {
+      return daily.map((d) => ({
+        statDate: d.statDate,
+        charge: d.charge,
+        show: d.show,
+        bclick: d.bclick,
+        conversionNum: d.conversionNum,
+        activation: d.activation,
+        registerCount: d.registerCount,
+        payCount: d.payCount,
+        payFirstDayCount: d.payFirstDayCount,
+      }));
+    }
+    return aggregateTrend(filteredAccounts.map((a) => result.series?.[a.advertiserId]));
+  }, [isSingleDay, trend, result, keywordTrim, filteredAccounts]);
 
   const chartLabels = useMemo(
     () =>
@@ -630,19 +742,10 @@ export default function DashboardPage() {
   const noAccounts = usable.length === 0;
   const cache = result ? readCache()[paramKey] : undefined;
   // 单日：分时走势有数据才显示；多天：始终显示按天走势（横坐标=日期，不让图表消失）
-  const showChart = isSingleDay
-    ? trend?.some((r) => r.charge > 0 || r.show > 0) ?? false
-    : (result?.daily?.length ?? 0) > 0;
-
-  /* —— 关键字筛选：只影响「明细表 + 顶部汇总」，走势图仍是所选账户合计 —— */
-  const keywordTrim = keyword.trim().toLowerCase();
-  const filteredAccounts = useMemo(() => {
-    const rows = result?.accounts ?? [];
-    if (!keywordTrim) return rows;
-    return rows.filter(
-      (a) => (a.accountName ?? '').toLowerCase().includes(keywordTrim) || a.advertiserId.includes(keywordTrim),
-    );
-  }, [result, keywordTrim]);
+  const showChart =
+    isSingleDay
+      ? chartRows.some((r) => r.charge > 0 || r.show > 0)
+      : (result?.daily?.length ?? 0) > 0 || chartRows.length > 0;
 
   /** 顶部汇总：有筛选就用筛选后的账户重算，无筛选直接用后端算好的合计 */
   const viewTotals = useMemo<OverviewTotals>(() => {
@@ -821,7 +924,7 @@ export default function DashboardPage() {
                   <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 'normal', marginLeft: 8 }}>
                     {range[0].format('YYYY-MM-DD')}
                     {isSingleDay ? '' : ` ~ ${range[1].format('YYYY-MM-DD')}`}
-                    {keywordTrim ? ' · 走势为所选账户合计，不随搜索变化' : ''}
+                    {keywordTrim ? ` · 已按筛选重算（${filteredAccounts.length} 个账户）` : ''}
                   </Typography.Text>
                 </span>
               }

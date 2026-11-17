@@ -131,6 +131,25 @@ export interface OverviewResult {
     payCount: number;
     payFirstDayCount: number;
   }>;
+  /**
+   * 每账户按天的原始计数（key = advertiserId）。
+   * 前端按关键字筛选账户后，用筛选集合的序列现场聚合走势图，
+   * 与顶部汇总同源同口径；比合计曲线多不了几个 KB。
+   */
+  series: Record<
+    string,
+    Array<{
+      statDate: string;
+      charge: number;
+      show: number;
+      bclick: number;
+      conversionNum: number;
+      activation: number;
+      registerCount: number;
+      payCount: number;
+      payFirstDayCount: number;
+    }>
+  >;
   fetchedAt: string;
   range: { startDate: string; endDate: string; granularity: 'DAILY' | 'HOURLY' };
 }
@@ -446,6 +465,25 @@ export class ReportService {
         payFirstDayCount: b.payFirstDayCount,
       }));
 
+    // 每账户按天序列：与 daily 完全同源（同一批 dayAcc），供前端筛选后现场聚合
+    const series: OverviewResult['series'] = {};
+    for (const r of results) {
+      if (!r.dayAcc || r.dayAcc.size === 0) continue;
+      series[r.advertiserId] = [...r.dayAcc.entries()]
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([statDate, b]) => ({
+          statDate,
+          charge: round2(b.charge),
+          show: b.aclick,
+          bclick: b.bclick,
+          conversionNum: b.conversionNum,
+          activation: b.activation,
+          registerCount: b.registerCount,
+          payCount: b.payCount,
+          payFirstDayCount: b.payFirstDayCount,
+        }));
+    }
+
     return {
       totals: {
         charge: t.charge,
@@ -473,6 +511,7 @@ export class ReportService {
       },
       accounts,
       daily,
+      series,
       fetchedAt: new Date().toISOString(),
       range: { startDate, endDate, granularity },
     };
@@ -484,6 +523,9 @@ export class ReportService {
    * 今天     → 实时查（顺手把小时行落库）；
    * 过去某天 → 读本地小时行。小时行只有「工作台当天在运行」时才会被收集
    *            （实时看板访问 / 每小时定时任务），没收集到的日期返回全 0，前端自动隐藏图。
+   *
+   * 返回 { hours, byAccount }：hours 是全部账户合计（旧口径，无筛选时直接用），
+   * byAccount 是每账户各自的小时序列 —— 前端按关键字筛选账户后现场聚合走势图。
    */
   async hourlyTrend(advertiserIds: string[], date: string) {
     const today = dayjs().format('YYYY-MM-DD');
@@ -512,7 +554,27 @@ export class ReportService {
       payCount: 0,
       payFirstDayCount: 0,
     });
-    const buckets = new Map<number, Bucket>();
+    // key = advertiserId → hour → bucket；合计 = 所有账户的并集
+    const byAccountHour = new Map<string, Map<number, Bucket>>();
+    const bump = (advertiserId: string, hour: number, add: Partial<Bucket>) => {
+      let perAcct = byAccountHour.get(advertiserId);
+      if (!perAcct) {
+        perAcct = new Map();
+        byAccountHour.set(advertiserId, perAcct);
+      }
+      const bucket = perAcct.get(hour) ?? emptyBucket();
+      bucket.charge += add.charge ?? 0;
+      bucket.show += add.show ?? 0;
+      bucket.aclick += add.aclick ?? 0;
+      bucket.photoClick += add.photoClick ?? 0;
+      bucket.bclick += add.bclick ?? 0;
+      bucket.conversionNum += add.conversionNum ?? 0;
+      bucket.activation += add.activation ?? 0;
+      bucket.registerCount += add.registerCount ?? 0;
+      bucket.payCount += add.payCount ?? 0;
+      bucket.payFirstDayCount += add.payFirstDayCount ?? 0;
+      perAcct.set(hour, bucket);
+    };
 
     if (dayjs(date).isBefore(dayjs(today))) {
       // —— 过去：本地小时行 ——
@@ -520,18 +582,7 @@ export class ReportService {
         where: { advertiserId: { in: advertiserIds }, statDate: date, statHour: { gte: 0 } },
       });
       for (const r of rows) {
-        const bucket = buckets.get(r.statHour) ?? emptyBucket();
-        bucket.charge += r.charge;
-        bucket.show += r.show;
-        bucket.aclick += r.aclick;
-        bucket.photoClick += r.photoClick;
-        bucket.bclick += r.bclick;
-        bucket.conversionNum += r.conversionNum;
-        bucket.activation += r.activation;
-        bucket.registerCount += r.registerCount;
-        bucket.payCount += r.payCount;
-        bucket.payFirstDayCount += r.payFirstDayCount;
-        buckets.set(r.statHour, bucket);
+        bump(r.advertiserId, r.statHour, r);
       }
     } else {
       // —— 今天：实时查 + 落库 ——
@@ -552,27 +603,36 @@ export class ReportService {
         }
       });
 
-      for (const rows of results) {
+      for (const [i, rows] of results.entries()) {
+        const advertiserId = advertiserIds[i];
         for (const row of rows) {
           const hour = row.statHour ?? 0;
-          const bucket = buckets.get(hour) ?? emptyBucket();
-          bucket.charge += row.charge;
-          bucket.show += row.show;
-          bucket.aclick += row.aclick;
-          bucket.photoClick += row.photoClick;
-          bucket.bclick += row.bclick;
-          bucket.conversionNum += row.conversionNum;
-          bucket.activation += row.activation;
-          bucket.registerCount += row.registerCount;
-          bucket.payCount += row.payCount;
-          bucket.payFirstDayCount += row.payFirstDayCount;
-          buckets.set(hour, bucket);
+          bump(advertiserId, hour, row);
         }
       }
     }
 
-    return Array.from({ length: 24 }, (_, hour) => {
-      const b = buckets.get(hour) ?? emptyBucket();
+    // 合计各小时（跨账户求和）
+    const totals = new Map<number, Bucket>();
+    for (const perAcct of byAccountHour.values()) {
+      for (const [hour, b] of perAcct) {
+        const t = totals.get(hour) ?? emptyBucket();
+        t.charge += b.charge;
+        t.show += b.show;
+        t.aclick += b.aclick;
+        t.photoClick += b.photoClick;
+        t.bclick += b.bclick;
+        t.conversionNum += b.conversionNum;
+        t.activation += b.activation;
+        t.registerCount += b.registerCount;
+        t.payCount += b.payCount;
+        t.payFirstDayCount += b.payFirstDayCount;
+        totals.set(hour, t);
+      }
+    }
+
+    const hours = Array.from({ length: 24 }, (_, hour) => {
+      const b = totals.get(hour) ?? emptyBucket();
       return {
         hour,
         charge: round2(b.charge),
@@ -587,6 +647,27 @@ export class ReportService {
         photoClickCost: b.photoClick > 0 ? round2(b.charge / b.photoClick) : 0,
       };
     });
+
+    // 每账户小时序列（只带前端用到的原始计数）
+    const byAccount: Record<string, Array<{ hour: number; charge: number; show: number; bclick: number; conversionNum: number; activation: number; registerCount: number; payCount: number; payFirstDayCount: number }>> = {};
+    for (const [advertiserId, perAcct] of byAccountHour) {
+      const rows = [...perAcct.entries()]
+        .sort(([a], [b]) => a - b)
+        .map(([hour, b]) => ({
+          hour,
+          charge: round2(b.charge),
+          show: b.aclick,
+          bclick: b.bclick,
+          conversionNum: b.conversionNum,
+          activation: b.activation,
+          registerCount: b.registerCount,
+          payCount: b.payCount,
+          payFirstDayCount: b.payFirstDayCount,
+        }));
+      if (rows.length > 0) byAccount[advertiserId] = rows;
+    }
+
+    return { hours, byAccount };
   }
 
   /* ------------------------------------------------------------------
