@@ -1,11 +1,16 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { App as AntApp, ConfigProvider } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
+import dayjs from 'dayjs';
+import 'dayjs/locale/zh-cn';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { HashRouter } from 'react-router-dom';
 import App from './App';
 import './styles.css';
+
+// 日历的月份/星期名由 dayjs 提供（antd 的 locale 只管按钮文案），两者都要设中文
+dayjs.locale('zh-cn');
 
 const queryClient = new QueryClient({
   defaultOptions: {
