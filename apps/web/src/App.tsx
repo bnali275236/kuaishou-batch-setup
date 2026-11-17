@@ -3,6 +3,7 @@ import {
   AppstoreAddOutlined,
   AppstoreOutlined,
   DashboardOutlined,
+  FireOutlined,
   SettingOutlined,
   TeamOutlined,
   UnorderedListOutlined,
@@ -17,6 +18,7 @@ import ShareGate from './components/ShareGate';
 import AccountsPage from './pages/AccountsPage';
 import AppCenterPage from './pages/AppCenterPage';
 import DashboardPage from './pages/DashboardPage';
+import HotTopicsPage from './pages/HotTopicsPage';
 import MaterialBoardPage from './pages/MaterialBoardPage';
 import PlanCreatePage from './pages/PlanCreatePage';
 import SetupPage from './pages/SetupPage';
@@ -58,7 +60,7 @@ function Shell() {
 
   const selected = location.pathname.startsWith('/setup')
     ? '/setup'
-    : ['/dashboard', '/materials', '/plan', '/appcenter', '/tasks', '/accounts'].find((k) =>
+    : ['/dashboard', '/materials', '/plan', '/appcenter', '/tasks', '/accounts', '/hot'].find((k) =>
         location.pathname.startsWith(k),
       ) ?? '/dashboard';
   const needReauth = health?.accounts.grantNeedReauth ?? 0;
@@ -71,6 +73,7 @@ function Shell() {
     { key: '/appcenter', icon: <AppstoreOutlined />, label: t('appcenter') },
     { key: '/tasks', icon: <UnorderedListOutlined />, label: t('tasks') },
     { key: '/accounts', icon: <TeamOutlined />, label: t('accounts') },
+    { key: '/hot', icon: <FireOutlined />, label: t('hot') },
   ];
 
   return (
@@ -171,6 +174,7 @@ function Shell() {
               <Route path="/appcenter" element={<AppCenterPage />} />
               <Route path="/tasks" element={<TasksPage />} />
               <Route path="/accounts" element={<AccountsPage />} />
+              <Route path="/hot" element={<HotTopicsPage />} />
               <Route path="/setup" element={<SetupPage />} />
             </Routes>
           </Content>

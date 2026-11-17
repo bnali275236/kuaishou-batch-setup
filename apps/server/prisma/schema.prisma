@@ -387,3 +387,23 @@ model MaterialDailyStat {
   @@index([photoId])
   @@index([advertiserId, statDate])
 }
+
+/// 实时热点：各平台热榜的最新快照（每次抓取按平台整表替换，不留历史）
+model HotTopicItem {
+  id        Int      @id @default(autoincrement())
+  /// 平台标识：weibo / baidu / toutiao / bilibili / zhihu
+  platform  String
+  /// 榜单名次（1 起）
+  rank      Int
+  /// 热点标题
+  title     String
+  /// 热度值原始文本（如「512.3 万」），缺失为 null
+  hotValue  String?
+  /// 词条落地页链接
+  url       String?
+  /// 本快照抓取时间
+  fetchedAt DateTime
+
+  @@unique([platform, rank])
+  @@index([platform])
+}

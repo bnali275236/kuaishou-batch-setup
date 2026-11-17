@@ -15,6 +15,7 @@ const DICT = {
   appcenter: '应用中心',
   tasks: '批量任务',
   accounts: '账户管理',
+  hot: '实时热点',
   settings: '设置',
 } as const;
 

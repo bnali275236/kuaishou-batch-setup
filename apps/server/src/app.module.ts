@@ -9,6 +9,7 @@ import { MapiModule } from './mapi/mapi.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
 import { AccountModule } from './modules/account/account.module';
 import { AppCenterModule } from './modules/appcenter/appcenter.module';
+import { HotTopicsModule } from './modules/hottopics/hot-topics.module';
 import { MaterialModule } from './modules/material/material.module';
 import { ManageModule } from './modules/manage/manage.module';
 import { OauthModule } from './modules/oauth/oauth.module';
@@ -35,6 +36,7 @@ import { SystemModule } from './modules/system/system.module';
     ReportModule,
     PlanModule,
     AppCenterModule,
+    HotTopicsModule,
     MaterialModule,
     ManageModule,
     SystemModule,
