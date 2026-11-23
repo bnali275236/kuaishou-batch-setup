@@ -259,6 +259,10 @@ export interface CardForm {
   searchExtend: boolean;
   /** 搜索人群追投（target_explore，仅搜索广告） */
   searchExplore: boolean;
+  /** 搜索广告正向关键词文本（一行一词，≤1000，单词 ≤20 字；组创建成功后经 word_info/create 下发） */
+  searchKeywordsText: string;
+  /** 关键词匹配方式：1 精确 / 2 短语 / 3 广泛 */
+  searchMatchType: number;
   /** 短语否定词文本（一行一词，≤200，仅搜索广告） */
   searchNegPhraseText: string;
   /** 精确否定词文本（一行一词，≤200，仅搜索广告） */
@@ -465,6 +469,8 @@ export function PlanCardMode(props: {
     searchQuick: false,
     searchExtend: false,
     searchExplore: false,
+    searchKeywordsText: '',
+    searchMatchType: 3,
     searchNegPhraseText: '',
     searchNegExactText: '',
     nativeAd: false,
@@ -486,6 +492,10 @@ export function PlanCardMode(props: {
     impressionMonitorUrl: '',
   }));
   const patch = (p: Partial<CardForm>) => setForm((f) => ({ ...f, ...p }));
+
+  /** 搜索关键词（去重后）与超长词（>20 字符，平台硬约束） */
+  const kwWords = useMemo(() => parseLines(form.searchKeywordsText), [form.searchKeywordsText]);
+  const kwTooLong = useMemo(() => kwWords.filter((w) => w.length > 20), [kwWords]);
 
   /* ---------------- 策略组：表单快照上报 / 载入（effect 在 selectedVideos 声明后） ---------------- */
 
@@ -525,6 +535,8 @@ export function PlanCardMode(props: {
   }, [form, selectedVideos]);
   // 载入侧：token 变化即整体恢复（合并到默认值之上，容忍字段增减）
   const appliedLoadToken = useRef(-1);
+  /** 搜索关键词 txt 导入的隐藏文件输入 */
+  const kwFileRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (!loadSignal || loadSignal.token === appliedLoadToken.current) return;
     appliedLoadToken.current = loadSignal.token;
@@ -1305,7 +1317,8 @@ export function PlanCardMode(props: {
             : null,
         // 搜索广告：人群追投 / 否词
         searchExplore: form.adType === 1 && form.searchExplore ? 1 : null,
-        searchKeywords: null,
+        searchKeywords: form.adType === 1 ? parseLines(form.searchKeywordsText) : null,
+        searchMatchType: form.adType === 1 ? form.searchMatchType : null,
         searchNegPhrase: form.adType === 1 ? parseLines(form.searchNegPhraseText) : null,
         searchNegExact: form.adType === 1 ? parseLines(form.searchNegExactText) : null,
         materialType: 1,
@@ -1666,6 +1679,7 @@ export function PlanCardMode(props: {
           <SumItem
             k="搜索设置"
             v={[
+              kwWords.length > 0 ? `${kwWords.length} 个关键词` : null,
               form.searchExtend ? '扩词开' : '扩词关',
               form.searchExplore ? '人群追投开' : null,
               parseLines(form.searchNegPhraseText).length + parseLines(form.searchNegExactText).length >
@@ -3668,6 +3682,84 @@ export function PlanCardMode(props: {
                 checked={form.searchExtend}
                 onChange={(on) => patch({ searchExtend: on })}
               />
+            </FormRow>
+            <FormRow
+              label="搜索关键词（选填）"
+              tip="用户搜索命中关键词即触发展现；单组 ≤1000 个、单词 ≤20 字符（不支持制表符/换行/Emoji）。组创建成功后经独立接口下发"
+            >
+              <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <ChipGroup
+                    value={String(form.searchMatchType)}
+                    onChange={(v) => patch({ searchMatchType: Number(v) })}
+                    options={[
+                      { value: '1', label: '精确', tip: '搜索词与关键词完全一致才展现' },
+                      { value: '2', label: '短语', tip: '搜索词包含关键词即展现' },
+                      { value: '3', label: '广泛', tip: '系统智能匹配相近搜索词，流量最大' },
+                    ]}
+                  />
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {kwWords.length > 0
+                      ? `已填 ${kwWords.length} 个词（去重后）`
+                      : '一行一个，或导入 txt 词包'}
+                  </Typography.Text>
+                  <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                    <Button size="small" onClick={() => kwFileRef.current?.click()}>
+                      导入 txt
+                    </Button>
+                    {form.searchKeywordsText && (
+                      <Button size="small" type="text" onClick={() => patch({ searchKeywordsText: '' })}>
+                        清空
+                      </Button>
+                    )}
+                  </div>
+                </div>
+                <Input.TextArea
+                  rows={3}
+                  value={form.searchKeywordsText}
+                  onChange={(e) => patch({ searchKeywordsText: e.target.value })}
+                  onBlur={() => pushHistory('plan.searchKeywords', form.searchKeywordsText)}
+                  placeholder={'如：妄想山海\n山海手游\nMMO下载\n（一行一个 / 逗号分隔，自动去重）'}
+                />
+                <HistoryDropdown
+                  histKey="plan.searchKeywords"
+                  onPick={(v) => patch({ searchKeywordsText: v })}
+                />
+                <input
+                  ref={kwFileRef}
+                  type="file"
+                  accept=".txt,.csv,text/plain"
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (!file) return;
+                    void file.text().then((t) => {
+                      const words = parseLines(t);
+                      if (words.length === 0) {
+                        message.warning('文件里没有解析到有效关键词');
+                        return;
+                      }
+                      patch({ searchKeywordsText: words.join('\n') });
+                      message.success(`已导入 ${words.length} 个词（去重后）`);
+                    });
+                  }}
+                />
+                {kwWords.length > 1000 && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message={`关键词 ${kwWords.length} 个，超过单组上限 1000 个，提交会被平台拒绝；请精简后再提交`}
+                  />
+                )}
+                {kwTooLong.length > 0 && (
+                  <Alert
+                    type="error"
+                    showIcon
+                    message={`有 ${kwTooLong.length} 个词超过 20 字符（如「${kwTooLong[0].slice(0, 24)}」），单词上限 20 字符，请修改后再提交`}
+                  />
+                )}
+              </Space>
             </FormRow>
             <FormRow
               label="否定词（选填）"
