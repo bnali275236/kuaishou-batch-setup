@@ -180,6 +180,8 @@ export const MAPI_PATHS = {
   VIDEO_UPLOAD: '/rest/openapi/v2/file/ad/video/upload',
   IMAGE_UPLOAD: '/rest/openapi/v2/file/ad/image/upload',
   VIDEO_LIST: '/rest/openapi/v1/file/ad/video/list',
+  /** 隐藏视频同步个人主页（把素材库里的视频推送到账户绑定的快手号主页） */
+  PHOTO_PUSH_TO_PROFILE: '/rest/openapi/gw/dsp/v1/photo/pushToProfile',
   TARGET_TEMPLATE_CREATE: '/rest/openapi/gw/dsp/target/template/create',
   TARGET_TEMPLATE_DETAILS: '/rest/openapi/gw/dsp/target/template/details',
 } as const;

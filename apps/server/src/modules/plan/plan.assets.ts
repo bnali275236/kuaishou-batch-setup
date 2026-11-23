@@ -247,6 +247,9 @@ export class PlanAssetsService {
    *
    * 平台要求先算 md5 再随表单提交（signature），字段：advertiser_id / signature /
    * photo_name / type(1=信息流竖版) + multipart 的 file。返回 photo_id（19 位，字符串透传）。
+   *
+   * pushToProfile（shield_backward_switch）：是否自动同步到账户绑定的快手号主页。
+   * true=主页可见，false=屏蔽；不传 = 平台默认（历史行为，不显式控制）。
    */
   async uploadVideoBuffer(
     advertiserId: string,
@@ -254,6 +257,7 @@ export class PlanAssetsService {
     name: string,
     fileName = 'video.mp4',
     contentType = 'video/mp4',
+    pushToProfile?: boolean,
   ): Promise<{ photoId: string; sizeBytes: number }> {
     await this.assertWritable(advertiserId);
     if (buffer.length < 1024) {
@@ -270,6 +274,10 @@ export class PlanAssetsService {
         signature,
         photo_name: name.slice(0, 50),
         type: 1, // 信息流竖版
+        // 上传 v2 接口参数：false=屏蔽（不上主页），true=同步主页（官方更新日志 2021-03-23）
+        ...(pushToProfile === undefined
+          ? {}
+          : { shield_backward_switch: pushToProfile }),
       },
       multipart: { buffer, fileName, contentType },
       action: 'plan.assets.video_upload',
@@ -285,6 +293,26 @@ export class PlanAssetsService {
       expiresAt: Date.now() + VIDEO_NAME_TTL_MS,
     });
     return { photoId, sizeBytes: buffer.length };
+  }
+
+  /**
+   * 把素材库里已上传（被屏蔽）的视频推送到账户绑定的快手号主页。
+   *
+   * 平台接口：gw/dsp/v1/photo/pushToProfile（官方更新日志 2023-09-22 新增，
+   * 未公开详细文档）。视频 list 接口返回 shield_status（是否已同步个人主页）。
+   * 入参按平台惯例传 advertiser_id + photo_id；如平台实际要求数组或别的字段名，
+   * 报 401000 时按错误信息调整。
+   */
+  async pushVideoToProfile(advertiserId: string, photoId: string): Promise<unknown> {
+    await this.assertWritable(advertiserId);
+    if (!photoId) throw new BadRequestException('缺少 photoId');
+    return this.gateway.call<Record<string, unknown>>({
+      advertiserId,
+      path: MAPI_PATHS.PHOTO_PUSH_TO_PROFILE,
+      category: 'create',
+      body: { advertiser_id: Number(advertiserId), photo_id: photoId },
+      action: 'plan.assets.photo_push_to_profile',
+    });
   }
 
   /**

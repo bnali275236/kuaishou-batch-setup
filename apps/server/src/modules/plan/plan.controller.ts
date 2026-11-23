@@ -74,6 +74,7 @@ export class PlanController {
     @Query('advertiserId') advertiserId: string,
     @Query('name') name?: string,
     @Query('fileName') fileName?: string,
+    @Query('pushToProfile') pushToProfile?: string,
   ) {
     const MAX_BYTES = 500 * 1024 * 1024;
     const buffer = await readRawBody(req, MAX_BYTES);
@@ -89,7 +90,26 @@ export class PlanController {
       String(name ?? '').trim() ||
       safeName.replace(/\.[^.]+$/, '').slice(0, 50) ||
       `本地视频${ext}`;
-    return this.assets.uploadVideoBuffer(advertiserId, buffer, photoName, safeName, contentType);
+    // '1'=同步快手主页（shield_backward_switch=true），'0'=屏蔽；不传=平台默认
+    const push =
+      pushToProfile === '1' ? true : pushToProfile === '0' ? false : undefined;
+    return this.assets.uploadVideoBuffer(
+      advertiserId,
+      buffer,
+      photoName,
+      safeName,
+      contentType,
+      push,
+    );
+  }
+
+  /** 把素材库里的视频推送到账户绑定的快手号主页（gw/dsp/v1/photo/pushToProfile） */
+  @Post('assets/videos/push-to-profile')
+  assetVideosPushToProfile(@Body() body: { advertiserId: string; photoId: string }) {
+    return this.assets.pushVideoToProfile(
+      String(body.advertiserId ?? ''),
+      String(body.photoId ?? ''),
+    );
   }
 
   /** 账户绑定的应用（应用安装/活跃用） */

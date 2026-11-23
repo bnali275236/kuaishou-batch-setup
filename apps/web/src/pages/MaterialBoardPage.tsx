@@ -11,6 +11,7 @@ import {
   App,
   Button,
   Card,
+  Checkbox,
   DatePicker,
   Empty,
   Input,
@@ -625,15 +626,37 @@ function videoUrlsOf(item: AssetItem): { cover?: string; video?: string } {
   return { cover, video };
 }
 
-/** 素材库详情弹窗：视频播放 + 基本信息 */
-function LibraryPreviewModal({ item, onClose }: { item: AssetItem | null; onClose: () => void }) {
+/** 素材库详情弹窗：视频播放 + 基本信息 + 同步主页操作 */
+function LibraryPreviewModal({
+  item,
+  onClose,
+  onPush,
+  pushing,
+}: {
+  item: AssetItem | null;
+  onClose: () => void;
+  onPush?: (item: AssetItem) => void;
+  pushing?: boolean;
+}) {
   const { cover, video } = item ? videoUrlsOf(item) : { cover: undefined, video: undefined };
   return (
     <Modal
       open={Boolean(item)}
       title={item?.name ?? '素材详情'}
       onCancel={onClose}
-      footer={null}
+      footer={
+        item && onPush ? (
+          <Button
+            type="primary"
+            ghost
+            loading={pushing}
+            onClick={() => onPush(item)}
+            title="把该视频推送到账户绑定的快手号主页（平台接口 pushToProfile）"
+          >
+            推送到快手主页
+          </Button>
+        ) : null
+      }
       width={640}
       destroyOnClose
     >
@@ -725,6 +748,8 @@ function MaterialLibraryPanel({ accounts }: { accounts: AccountSummary[] }) {
   const [uploading, setUploading] = useState(false);
   const [percent, setPercent] = useState(0);
   const [uploadName, setUploadName] = useState('');
+  /** 上传后是否同步到账户绑定的快手号主页（shield_backward_switch） */
+  const [pushToProfile, setPushToProfile] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const handleFile = async (file: File | undefined) => {
     if (!file) return;
@@ -748,11 +773,13 @@ function MaterialLibraryPanel({ accounts }: { accounts: AccountSummary[] }) {
       const res = await uploadBinary<{ photoId: string; sizeBytes: number }>(
         `/api/plan/assets/videos/upload?advertiserId=${encodeURIComponent(
           advertiserId,
-        )}&name=${encodeURIComponent(name)}`,
+        )}&name=${encodeURIComponent(name)}&pushToProfile=${pushToProfile ? '1' : '0'}`,
         file,
         { fileName: file.name, onProgress: (p) => setPercent(p.percent) },
       );
-      message.success(`「${name}」已上传到账户素材库`);
+      message.success(
+        `「${name}」已上传到账户素材库${pushToProfile ? '，并同步到快手主页' : '（未同步主页）'}`,
+      );
       void listQuery.refetch();
       setPreviewId(res.photoId);
     } catch (err) {
@@ -762,6 +789,32 @@ function MaterialLibraryPanel({ accounts }: { accounts: AccountSummary[] }) {
       setPercent(0);
       setUploadName('');
     }
+  };
+
+  /* 已上传视频补推主页（pushToProfile 接口） */
+  const [pushingId, setPushingId] = useState<string | null>(null);
+  const pushToProfileAction = (item: AssetItem) => {
+    if (!advertiserId) return;
+    modal.confirm({
+      title: `把「${item.name || item.id}」推送到快手主页？`,
+      content:
+        '推送后该视频会出现在该账户绑定的快手号个人主页，对外可见。平台接口为 pushToProfile，推送结果以平台返回为准。',
+      okText: '推送',
+      onOk: async () => {
+        setPushingId(item.id);
+        try {
+          await api.post('/api/plan/assets/videos/push-to-profile', {
+            advertiserId,
+            photoId: item.id,
+          });
+          message.success('已推送到快手主页');
+        } catch (err) {
+          modal.error({ title: '推送失败', content: explainError(err) });
+        } finally {
+          setPushingId(null);
+        }
+      },
+    });
   };
 
   /* 筛选：关键词 + 排序；数据量大时分页 */
@@ -841,6 +894,15 @@ function MaterialLibraryPanel({ accounts }: { accounts: AccountSummary[] }) {
         >
           {uploading ? '上传中' : '上传本地视频'}
         </Button>
+        <Checkbox
+          checked={pushToProfile}
+          disabled={!writable || uploading}
+          onChange={(e) => setPushToProfile(e.target.checked)}
+        >
+          <Tooltip title="勾选后，本次上传的视频会自动同步到该账户绑定的快手号个人主页（shield_backward_switch=true）；不勾选则屏蔽、不上主页">
+            上传后同步到快手主页
+          </Tooltip>
+        </Checkbox>
         <Button icon={<SyncOutlined />} loading={syncing} disabled={!advertiserId} onClick={() => void syncVideos()}>
           同步素材
         </Button>
@@ -994,7 +1056,12 @@ function MaterialLibraryPanel({ accounts }: { accounts: AccountSummary[] }) {
         </>
       )}
 
-      <LibraryPreviewModal item={previewItem} onClose={() => setPreviewId(null)} />
+      <LibraryPreviewModal
+        item={previewItem}
+        onClose={() => setPreviewId(null)}
+        onPush={writable ? pushToProfileAction : undefined}
+        pushing={previewItem ? pushingId === previewItem.id : false}
+      />
     </Card>
   );
 }
