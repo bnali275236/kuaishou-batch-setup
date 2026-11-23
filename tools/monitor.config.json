@@ -8,8 +8,14 @@
     "group": "快手投放沟通群",
     "enabled": true
   },
-  "bidYuan": 9,
+  "bidYuan": 8,
+  "totalBudgetYuan": 5000,
   "dailyBudgetYuan": 2500,
+  "budgetPlan": {
+    "124276386": 2500,
+    "124276387": 2500,
+    "note": "两户合计 totalBudgetYuan=5000；单户额度可按消耗节奏调拨，巡检会给出建议值"
+  },
   "learning": {
     "observeMaxAct": 8,
     "rampMaxAct": 20,
@@ -42,8 +48,8 @@
     "enabled": true,
     "level": "B",
     "bidMin": 8,
-    "bidMax": 10,
-    "bidBase": 9,
+    "bidMax": 9,
+    "bidBase": 8,
     "maxActionsPerHour": 8,
     "maxKillPerDay": 10,
     "maxBidPerDay": 12

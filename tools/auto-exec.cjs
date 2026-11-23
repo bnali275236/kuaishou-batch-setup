@@ -6,9 +6,17 @@
  * 规则：
  *  K1 创意消耗 ≥ 36 元（4×出价）且激活=0        → 关停该创意
  *  K2 创意消耗 ≥ 54 元（6×）且 CPA ≥ 18（2×）    → 关停该创意
- *  B1 组上线≥3h(12点后)、消耗≥3元、展示<1000     → 出价 +10%（≤10），每组每日最多2次
- *  B2 组激活≥20（已出学习期）且 CPA>13.5          → 出价 −10%（≥8），每组每日最多2次
- *  B3 被 B1 提过价的组，展示≥5000 且 CPA≤11      → 回调出价至 9
+ *  B0 出价纪律（2026-11-10 用户拍板）：非「新素材」组出价一律 =8，>8 立即回调
+ *  B1 仅「新素材」测试组：消耗≥3元、展示<1000 → 出价 +10%（上限 9），每组每日最多2次
+ *
+ *  「新素材」定义（2026-11-11 用户拍板）：组内素材**全部**是近 7 天内上传的（按平台
+ *  素材库 uploadTime，不是素材文件名里的日期，也不是建组日期）。组名含「新素材/测新」
+ *  仅作兜底（本地库查不到素材归属时用，如手工建的计划）。
+ *  B2 组激活≥20（已出学习期）且 CPA>8（成本红线）  → 出价 −10%（下限 8，即直接回 8）
+ *  B3 被 B1 提过价的组，跑量即回调（激活≥2 或 消耗≥15元）→ 回调出价至 8
+ *
+ *  ⚠ 出价以平台侧回读为准（by-ids 的 bidYuan），不用建组时冻结的 payload——
+ *    否则提价后下一轮仍按旧价判断，会反复提价。
  *
  * 护栏：
  *  - 出价硬区间 [8, 10]；只动本工具建的计划（本地库能映射到出价的组）
@@ -79,18 +87,40 @@ async function api(p, body) {
   return JSON.parse(txt);
 }
 
-/** 本工具建过的组：unitId → { bid, unitName, advertiserId }（出价 0 = UAX 自动，跳过） */
+/** 本工具建过的组：unitId → { bid, unitName, advertiserId, photoIds }（出价 0 = UAX 自动，跳过） */
 async function ourUnits() {
   const { PrismaClient } = require('@prisma/client');
   const p = new PrismaClient({ datasources: { db: { url: 'file:' + DB } } });
   try {
-    const items = await p.batchTaskItem.findMany({
+    const units = await p.batchTaskItem.findMany({
       where: { level: 'UNIT', platformId: { not: null } },
-      select: { platformId: true, advertiserId: true, displayName: true, payloadJson: true, createdAt: true },
+      select: { id: true, platformId: true, advertiserId: true, displayName: true, payloadJson: true, createdAt: true },
       orderBy: { createdAt: 'desc' },
     });
+    // 组 → 素材 photoIds：创意条目的 parentId 指向组条目，payload 里有 photo_id
+    const photoByUnit = new Map(); // 组条目 id → Set(photoId)
+    if (units.length) {
+      const creatives = await p.batchTaskItem.findMany({
+        where: { level: 'CREATIVE', parentId: { in: units.map((u) => u.id) } },
+        select: { parentId: true, payloadJson: true },
+      });
+      for (const c of creatives) {
+        try {
+          const pl = JSON.parse(c.payloadJson || '{}');
+          const ids = [];
+          if (pl.photo_id) ids.push(String(pl.photo_id));
+          for (const v of pl.creative_videos || pl.videos || []) if (v.photo_id) ids.push(String(v.photo_id));
+          if (!ids.length) continue;
+          const set = photoByUnit.get(c.parentId) || new Set();
+          ids.forEach((x) => set.add(x));
+          photoByUnit.set(c.parentId, set);
+        } catch {
+          /* payload 解析失败不影响出价 */
+        }
+      }
+    }
     const map = new Map();
-    for (const it of items) {
+    for (const it of units) {
       const key = `${it.advertiserId}:${it.platformId}`;
       if (map.has(key)) continue;
       let pl = {};
@@ -102,12 +132,56 @@ async function ourUnits() {
       let bid = Number(pl.cpa_bid ?? pl.bid ?? 0);
       if (bid > 200) bid = bid / 1000; // payload 存厘（9000=9元），归一到元；UAX 出价 0 已被上面过滤
       if (!(bid > 0)) continue; // UAX/未设出价的不碰
-      map.set(key, { unitId: String(it.platformId), advertiserId: it.advertiserId, unitName: it.displayName || '', bid });
+      map.set(key, {
+        unitId: String(it.platformId),
+        advertiserId: it.advertiserId,
+        unitName: it.displayName || '',
+        bid,
+        photoIds: [...(photoByUnit.get(it.id) || [])],
+      });
     }
     return map;
   } finally {
     await p.$disconnect();
   }
+}
+
+/** 新素材窗口（天）：组内素材全部在此窗口内上传 → 新素材组 */
+const NEW_MATERIAL_DAYS = 7;
+
+/** photoId → 上传时间(ms)。素材库拿不到时返回 null（新素材判定回退到组名匹配） */
+async function photoUploadTimes(accId) {
+  try {
+    const r = await api(`/api/plan/assets/videos?advertiserId=${accId}`);
+    const list = Array.isArray(r) ? r : r.items || r.list || r.videos || [];
+    const m = new Map();
+    for (const v of list) {
+      const t = v.uploadTime ? new Date(String(v.uploadTime).replace(' ', 'T')).getTime() : 0;
+      if (t > 0) m.set(String(v.id), t);
+    }
+    return m;
+  } catch (e) {
+    log(`素材库拉取失败（${accId}）：${String(e.message).slice(0, 80)}——新素材判定回退组名匹配`);
+    return null;
+  }
+}
+
+/** 平台侧当前出价（by-ids，authority）：Map `${acc}:${unitId}` → bidYuan */
+async function platformBids(accId, unitIds) {
+  const map = new Map();
+  if (!unitIds.length) return map;
+  try {
+    const j = await api('/api/manage/structure/by-ids', { advertiserId: accId, level: 'unit', ids: unitIds });
+    const items = j.items || j.data || j.rows || j;
+    for (const u of Array.isArray(items) ? items : []) {
+      const id = String(u.unitId || u.id || '');
+      const bid = Number(u.bidYuan ?? u.bid ?? u.cpaBid ?? 0);
+      if (id && bid > 0) map.set(`${accId}:${id}`, bid);
+    }
+  } catch (e) {
+    log(`平台出价回读失败（降级用 payload 出价）: ${e.message}`);
+  }
+  return map;
 }
 
 async function unitRows(accId, date) {
@@ -210,7 +284,7 @@ async function run(ctx, perAccount) {
     if (executed.length >= (AE.maxActionsPerHour ?? 8)) return;
     if (newBid < BID_MIN || newBid > BID_MAX || newBid === u.bid) return;
     const cnt = (acts.raises[`bid:${u.unitId}`] || 0);
-    if (cnt >= 2) return;
+    if (cnt >= 2 && newBid > u.bid) return; // 次数上限只限提价；降回 9 不受限
     try {
       const oldBid = u.bid;
       if (!dry) {
@@ -249,28 +323,51 @@ async function run(ctx, perAccount) {
 
   for (const pa of perAccount) {
     if (!pa.unitRows) continue;
+    // 平台侧真实出价优先（payload 是建组时冻结的，提价后已过期）
+    const ourIds = pa.unitRows.map((r) => String(r.unitId || '')).filter((id) => umap.has(`${pa.acc.id}:${id}`));
+    const pBids = await platformBids(pa.acc.id, ourIds);
+    // 新素材组（按素材真实上传时间）：组内素材全部是近 7 天上传的才算；查不到素材库时回退组名
+    const uploads = await photoUploadTimes(pa.acc.id);
+    const newUnitIds = new Set();
+    if (uploads) {
+      const cutoffNew = Date.now() - NEW_MATERIAL_DAYS * 86400000;
+      for (const [key, u] of umap) {
+        if (!key.startsWith(`${pa.acc.id}:`)) continue;
+        if (u.photoIds && u.photoIds.length && u.photoIds.every((pid) => (uploads.get(pid) || 0) >= cutoffNew)) {
+          newUnitIds.add(u.unitId);
+        }
+      }
+    }
     for (const r of pa.unitRows) {
       const uid = String(r.unitId || '');
       const u = umap.get(`${pa.acc.id}:${uid}`);
       if (!u) continue; // 不是我们的组
+      if (pBids.has(`${pa.acc.id}:${uid}`)) u.bid = pBids.get(`${pa.acc.id}:${uid}`);
       const charge = Number(r.charge || 0);
       const show = Number(r.aclick || r.show || 0);
       const act = Number(r.activation || 0);
       const cpa = r.activationCost != null ? Number(r.activationCost) : act > 0 ? charge / act : null;
+      // 新素材判定：主判据=素材真实上传时间（7 天内），组名匹配仅兜底
+      const isNewTest = newUnitIds.has(uid) || /新素材|测新/.test(u.unitName || '');
 
-      // B3 回调：今天被提过价 且 已拿到量
-      if (cpa != null && show >= 5000 && cpa <= 11 && u.bid > BID_BASE) {
-        await setBid(u, BID_BASE, 'B3', `展示 ${show} / CPA ${yuan(cpa)} 已达标`, r);
+      // B0 出价纪律：非新素材组 ≤9（用户 2026-11-10 口径：只有新素材可 9–10 测试）
+      if (!isNewTest && u.bid > BID_BASE) {
+        await setBid(u, BID_BASE, 'B0', `非新素材组出价纪律（${yuan(u.bid)}→${yuan(BID_BASE)}）`, r);
         continue;
       }
-      // B1 提价抢量
-      if (hour >= 12 && hour <= 22 && charge >= 3 && show > 0 && show < 1000) {
-        await setBid(u, Math.min(Math.round(u.bid * 1.1 * 10) / 10, BID_MAX), 'B1', `消耗 ${yuan(charge)} 仅展示 ${show}`, r);
+      // B3 回调：被提价的新素材组一旦跑量（激活≥2 或 消耗≥15）立即回调 9
+      if (u.bid > BID_BASE && (act >= 2 || charge >= 15)) {
+        await setBid(u, BID_BASE, 'B3', `跑量即回调：激活 ${act} / 消耗 ${yuan(charge)}`, r);
         continue;
       }
-      // B2 成熟期降本
-      if (act >= 20 && cpa != null && cpa > 13.5) {
-        await setBid(u, Math.max(Math.round(u.bid * 0.9 * 10) / 10, BID_MIN), 'B2', `激活 ${act} / CPA ${yuan(cpa)}`, r);
+      // B2 成熟期降本：目标成本 ≤8（基准价即红线）
+      if (act >= 20 && cpa != null && cpa > BID_BASE) {
+        await setBid(u, Math.max(Math.round(u.bid * 0.9 * 10) / 10, BID_MIN), 'B2', `激活 ${act} / CPA ${yuan(cpa)} 超 ${yuan(BID_BASE)} 元红线`, r);
+        continue;
+      }
+      // B1 提价抢量：仅新素材测试组（复投/跑量组不享受 9–10 测试价）
+      if (isNewTest && hour >= 12 && hour <= 22 && charge >= 3 && show > 0 && show < 1000) {
+        await setBid(u, Math.min(Math.round(u.bid * 1.1 * 10) / 10, BID_MAX), 'B1', `新素材测试：消耗 ${yuan(charge)} 仅展示 ${show}`, r);
       }
     }
   }
@@ -288,4 +385,4 @@ async function run(ctx, perAccount) {
   return executed;
 }
 
-module.exports = { run };
+module.exports = { run, ourUnits, photoUploadTimes, NEW_MATERIAL_DAYS };

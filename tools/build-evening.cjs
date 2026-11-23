@@ -6,7 +6,7 @@
  *  1. 拉两户今日创意级报表（实时）
  *  2. 筛「激活 ≥ 2 且 CPA ≤ 10（≈1.1× 出价）」的创意，按激活数降序取 TOP 6
  *  3. 用该创意**当初的原始文案**（local payload 里的 description，是被验证过的）复投
- *  4. 每户建 1 条「PZ38x-晚高峰-MMDD」，出价 9，版位 [6]
+ *  4. 每户建 1 条「PZ38x-晚高峰-MMDD」，出价 8，版位 [6]
  *  5. 无可达标创意 → 不建计划，只推卡片（避免无意义铺量）
  *
  * 只处理库内可映射 photoId 的创意（即本工具建的计划）；用户手工建的 UAX 创意无法映射，跳过。
@@ -15,6 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const effects = require('./auto-effects.cjs');
+const { ensureBackend } = require('./ensure-backend.cjs');
 
 const CFG = JSON.parse(fs.readFileSync(path.join(__dirname, 'monitor.config.json'), 'utf-8'));
 const DRY = process.argv.includes('--dry');
@@ -169,6 +170,7 @@ async function alreadyDone(name) {
 }
 
 (async () => {
+  await ensureBackend(); // 后端掉线先拉起来，否则后面全是空数据
   const today = ymd();
   const suffix = mmdd();
   const taskName = `晚高峰-${suffix}（自动）`;
@@ -224,10 +226,10 @@ async function alreadyDone(name) {
     process.exit(0);
   }
 
-  const rows = usable.map((x, i) => buildRow(x.acc.id, x.acc.tag, i + 1, `PZ${x.acc.tag}-晚高峰-${suffix}`, today, 9, x.vids));
+  const rows = usable.map((x, i) => buildRow(x.acc.id, x.acc.tag, i + 1, `PZ${x.acc.tag}-晚高峰-${suffix}`, today, 8, x.vids));
   for (const x of usable) {
     const r = rows.find((rr) => rr.advertiserId === x.acc.id);
-    log(`${r.advertiserId} ${r.campaignName}：${x.vids.length} 条 / 出价 9`);
+    log(`${r.advertiserId} ${r.campaignName}：${x.vids.length} 条 / 出价 8`);
     x.vids.forEach((v) => log(`   ${v.name.slice(0, 38)} · ${yuan(v.charge)}元/${v.act}激活/CPA${yuan(v.cpa)}`));
   }
 
@@ -258,7 +260,7 @@ async function alreadyDone(name) {
   const issues = [];
   for (const r of rows) {
     if (JSON.stringify(r.sceneIds) !== '[6]') issues.push(`${r.campaignName} 版位异常 ${JSON.stringify(r.sceneIds)}`);
-    if (!(r.cpaBidYuan >= 8 && r.cpaBidYuan <= 10)) issues.push(`${r.campaignName} 出价越界 ${r.cpaBidYuan}`);
+    if (!(r.cpaBidYuan >= 8 && r.cpaBidYuan <= 9)) issues.push(`${r.campaignName} 出价越界 ${r.cpaBidYuan}`);
     for (const v of r.units[0].videos) if (!v.description) issues.push(`素材缺文案：${v.name}`);
   }
 
@@ -293,7 +295,7 @@ async function alreadyDone(name) {
     `### 【快手基建·晚高峰】${suffix} 已验证创意复投`,
     '',
     `- 任务「${taskName}」：**${['DONE', 'SUCCESS', 'SUCCEEDED'].includes(st) ? '✅ 全部成功' : '⚠️ ' + st}** ${okN}/${totN}`,
-    `- 出价 9 元 · 版位 [6] 上下滑 · ocpx 激活 180 · 用原始已验证文案`,
+    `- 出价 8 元 · 版位 [6] 上下滑 · ocpx 激活 180 · 用原始已验证文案`,
   ];
   for (const x of usable) {
     lines.push(`- ${x.acc.tag}：${x.vids.length} 条`);

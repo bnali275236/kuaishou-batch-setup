@@ -45,12 +45,10 @@ import { rowsToCardForm } from './plan/rowsToForm';
  * 摘要卡 + 编辑抽屉 + 三层预览树表已完整覆盖逐行微调的场景）。
  *
  * 保留的设计选择：
- * 1. **营销目标决定可用链路参数**。应用安装要 app_id、销售线索要落地页。
+ * 1. **营销目标决定可用链路参数**。应用安装要 app_id、销售线索要落地页；
+ *    营销目标本身在 PlanCardMode 的「广告计划基本信息」里选，改动经 onCampaignTypeChange 回写这里。
  * 2. **提交前必须过校验**。300 次平台调用的代价太高，参数错必须本地拦住。
  */
-
-/** 用户选定的投放形态（决定可用链路参数） */
-const SUPPORTED_TYPES = [2, 7, 5];
 
 export default function PlanCreatePage() {
   const { message, modal } = App.useApp();
@@ -356,18 +354,14 @@ export default function PlanCreatePage() {
         <Row gutter={16} align="middle">
           <Col span={7}>
             <div style={{ fontSize: 12, color: '#888780', marginBottom: 4 }}>营销目标</div>
-            <Select
-              style={{ width: '100%' }}
-              value={campaignType}
-              onChange={(v) => {
-                setCampaignType(v);
-                setValidated(null);
-              }}
-              options={SUPPORTED_TYPES.map((code) => ({
-                value: code,
-                label: CAMPAIGN_TYPE[code],
-              }))}
-            />
+            <Space size={8}>
+              <Tag color="orange" style={{ marginInlineEnd: 0 }}>
+                {CAMPAIGN_TYPE[campaignType]}
+              </Tag>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                在下方「广告计划基本信息」里修改
+              </Typography.Text>
+            </Space>
           </Col>
           <Col span={7}>
             <div style={{ fontSize: 12, color: '#888780', marginBottom: 4 }}>任务名称</div>
@@ -414,6 +408,10 @@ export default function PlanCreatePage() {
         locate={locate}
         strategyRef={strategyRef}
         loadSignal={loadSignal}
+        onCampaignTypeChange={(code) => {
+          setCampaignType(code);
+          setValidated(null);
+        }}
         onGenerate={(generated) => {
           setRows(generated);
           setValidated(null);

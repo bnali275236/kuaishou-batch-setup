@@ -5,7 +5,7 @@
  * 流程：
  *  1. 从罗盘素材榜（近 7 天，全账户共享池）取复投池：激活≥3 且 CPA≤11，按消耗排序取 TOP 10
  *     （池子不够时放宽到 激活≥2 且 CPA≤13）
- *  2. 出价：基础 9 元；复投池平均 CPA ≤ 7 时提到 9.5 抢量（上限 10，绝不超）
+ *  2. 出价：固定 8 元（2026-11-10 口径：跑量统一 8，新素材上限 9）
  *  3. 每户各建 1 条「PZ38x-跑量复投-MMDD」：计划→组→创意链路，版位只传 [6] 上下滑大屏
  *  4. 当日已创建过同名任务则跳过（幂等）
  *  5. 提交后轮询任务结果，推送钉钉卡片
@@ -16,6 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const effects = require('./auto-effects.cjs');
+const { ensureBackend } = require('./ensure-backend.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const CFG = JSON.parse(fs.readFileSync(path.join(__dirname, 'monitor.config.json'), 'utf-8'));
@@ -192,9 +193,8 @@ async function accountPool(advertiserId, pool) {
 function bidFor(pool) {
   const withCpa = pool.filter((m) => m.cpa != null);
   const avg = withCpa.length ? withCpa.reduce((s, m) => s + m.cpa, 0) / withCpa.length : null;
-  let bid = 9;
-  if (avg != null && avg <= 7) bid = 9.5; // 池子质量好，小幅抢量
-  bid = Math.min(bid, 10); // 硬上限
+  // 2026-11-10 用户口径：所有组统一 8 元，新素材测试上限 9
+  const bid = 8;
   return { bid, avgCpa: avg };
 }
 
@@ -252,6 +252,7 @@ async function alreadyDone(name) {
 
 /* ---------------- 主流程 ---------------- */
 (async () => {
+  await ensureBackend(); // 后端掉线先拉起来，否则后面全是空数据
   const today = ymd();
   const suffix = mmdd();
   const taskName = `跑量复投-${suffix}（自动）`;
@@ -334,7 +335,7 @@ async function alreadyDone(name) {
   const issues = [];
   for (const r of rows) {
     if (JSON.stringify(r.sceneIds) !== '[6]') issues.push(`${r.campaignName} 版位异常 ${JSON.stringify(r.sceneIds)}`);
-    if (!(r.cpaBidYuan >= 8 && r.cpaBidYuan <= 10)) issues.push(`${r.campaignName} 出价越界 ${r.cpaBidYuan}`);
+    if (!(r.cpaBidYuan >= 8 && r.cpaBidYuan <= 9)) issues.push(`${r.campaignName} 出价越界 ${r.cpaBidYuan}`);
     if (r.ocpxActionType !== 180) issues.push(`${r.campaignName} ocpx 异常 ${r.ocpxActionType}`);
     for (const v of r.units[0].videos) {
       if (!(COPY[themeOf(v.name)] ?? COPY.ty).includes(v.description)) issues.push(`文案疑似错配：${v.name} ← ${v.description}`);
@@ -387,7 +388,7 @@ async function alreadyDone(name) {
     failItems.slice(0, 6).forEach((f) => lines.push(`- ${f.displayName}：${String(f.error || '').slice(0, 80)}`));
   }
   lines.push('', issues.length ? `**⚠ 自查发现 ${issues.length} 个问题：**\n${issues.slice(0, 6).map((x) => `- ${x}`).join('\n')}` : '✅ 自查通过：版位/出价/ocpx/文案一致性/计划投放状态全部正常。');
-  lines.push('', '出价 9–9.5 之间按池质量浮动，上限 10。观察期不做成本判定（激活<8 不判），巡检每小时自动盯。');
+  lines.push('', '复投组固定出价 8 元（2026-11-10 口径：跑量统一 8，新素材测试上限 9）；观察期不做成本判定（激活<8 不判），巡检每小时自动盯。');
   pushDingtalk(lines.join('\n'));
   process.exit(['DONE', 'SUCCESS', 'SUCCEEDED', 'PARTIAL'].includes(st) ? 0 : 1);
 })();

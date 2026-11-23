@@ -10,7 +10,7 @@ import type { ReactNode } from 'react';
 const DICT = {
   appName: '快手广告工作台',
   dashboard: '盯盘看板',
-  materials: '素材看板',
+  materials: '素材中心',
   plan: '上计划',
   appcenter: '应用中心',
   tasks: '批量任务',

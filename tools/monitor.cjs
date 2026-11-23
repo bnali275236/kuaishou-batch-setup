@@ -13,6 +13,8 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const autoExec = require('./auto-exec.cjs');
+const autoBudget = require('./auto-budget.cjs');
+const { ensureBackend, ensureWatchdog } = require('./ensure-backend.cjs');
 const autoEffects = require('./auto-effects.cjs');
 
 const ROOT = path.join(__dirname, '..');
@@ -298,6 +300,77 @@ function evalAccount(a, budgetYuan, hour, pace) {
   return alerts;
 }
 
+/**
+ * 账户级预算只看「合计 5000」，单户额度可调拨（2026-11-10 用户口径）。
+ * 单户 2500 只是初始切分，不是硬约束；撞线但合计还有额度 → 提示调拨，不报警停投。
+ */
+function allocOf(accId) {
+  const plan = { ...(CFG.budgetPlan || {}), ...autoBudget.currentPlan() };
+  return Number(plan[accId] || CFG.dailyBudgetYuan);
+}
+
+function evalTotal(metrics, budgets, hour, pace) {
+  const alerts = [];
+  const TOTAL = Number(CFG.totalBudgetYuan || CFG.dailyBudgetYuan * CFG.accounts.length);
+  const ok = metrics.filter((m) => !m.error);
+  if (!ok.length) return alerts;
+  const total = ok.reduce((s, m) => s + (m.charge || 0), 0);
+  const exp = TOTAL * pace;
+
+  // T1 合计进度（12 点后、量跑起来才判）
+  if (hour >= 12 && total >= CFG.bidYuan * 3) {
+    const ratio = total / Math.max(exp, 1);
+    if (ratio > T.paceHigh) {
+      alerts.push({ key: 'AT-fast', sev: 'YEL', code: 'A2', text: `两户合计消耗偏快：${yuan(total)} / 进度应花 ${yuan(exp)}（${Math.round(ratio * 100)}%）· 总预算 ${TOTAL}` });
+    } else if (ratio < T.paceLow) {
+      alerts.push({ key: 'AT-slow', sev: 'YEL', code: 'A1', text: `两户合计消耗滞后：${yuan(total)} / 进度应花 ${yuan(exp)}（${Math.round(ratio * 100)}%）· 总预算 ${TOTAL}` });
+    }
+  }
+  // T2 合计撞线
+  if (hour < T.budgetHitAt && total >= TOTAL * 0.95) {
+    alerts.push({ key: 'AT-hit', sev: 'RED', code: 'A2', text: `两户合计预算将撞线：${yuan(total)} / ${TOTAL}，现在才 ${hm()}——要放量得加总预算，单户调拨已无用` });
+  }
+
+  // T3 单户撞线但合计还有额度 → 建议调拨（不是异常，是结构问题）
+  for (const m of ok) {
+    const b = Number(budgets[m.id] || allocOf(m.id));
+    if (hour < T.budgetHitAt && b > 0 && m.charge >= b * 0.95 && total < TOTAL * 0.9) {
+      const others = ok.filter((x) => x.id !== m.id);
+      const otherCharge = others.reduce((s, x) => s + (x.charge || 0), 0);
+      const slack = Math.max(0, Math.round((TOTAL - total) / 100) * 100);
+      alerts.push({
+        key: `AT-perhit-${m.tag}`, sev: 'RED', code: 'A7',
+        text: `${m.tag} 单户额度将用尽（${yuan(m.charge)}/${b}），但两户合计只花了 ${yuan(total)}/${TOTAL}（另一户 ${yuan(otherCharge)}）→ 可把额度从另一户调 ${slack} 元过来，不用停投`,
+      });
+    }
+  }
+
+  // T4 结构性失衡：消耗占比 vs 额度占比 偏离过大 → 给出具体调拨方案
+  const allocSum = ok.reduce((s, m) => s + allocOf(m.id), 0) || 1;
+  if (total >= 200 && hour >= 11) {
+    const dev = ok
+      .map((m) => ({ m, spendShare: (m.charge || 0) / total, allocShare: allocOf(m.id) / allocSum }))
+      .sort((x, y) => y.spendShare - x.spendShare);
+    const top = dev[0];
+    const bottom = dev[dev.length - 1];
+    const gap = top.spendShare - top.allocShare;
+    if (dev.length > 1 && gap >= 0.2) {
+      const suggest = ok.map((m) => {
+        const raw = total > 0 ? ((m.charge || 0) / total) * TOTAL : TOTAL / ok.length;
+        const v = Math.min(4500, Math.max(500, Math.round(raw / 100) * 100));
+        return { tag: m.tag, v };
+      });
+      const sum = suggest.reduce((s, x) => s + x.v, 0);
+      if (sum !== TOTAL) suggest[0].v += TOTAL - sum; // 凑齐 5000
+      alerts.push({
+        key: 'AT-alloc', sev: 'YEL', code: 'A7',
+        text: `预算切分与消耗结构不匹配：${top.m.tag} 消耗占 ${Math.round(top.spendShare * 100)}%、额度只占 ${Math.round(top.allocShare * 100)}%（${bottom.m.tag} 反之）→ 建议调成 ${suggest.map((s) => `${s.tag} ${s.v}`).join(' / ')}（合计仍 ${TOTAL}）`,
+      });
+    }
+  }
+  return alerts;
+}
+
 function evalCreatives(accTag, rows, nameMap) {
   const alerts = [];
   const hour = now().getHours();
@@ -333,8 +406,8 @@ function evalCreatives(accTag, rows, nameMap) {
 const SEV_ICON = { RED: '🔴', YEL: '🟡', GOOD: '🟢' };
 const CODE_ACTION = {
   A0: '检查后端 7801 是否在线 / 授权是否失效',
-  A1: '查审核与出价：给最弱计划提价 10–20%，或换素材',
-  A2: '降出价 / 关停 CPA 最差创意；必要时申请加预算',
+  A1: '查审核与出价：新素材可提到 9 元（上限），复投组保持 8',
+  A2: '降出价（基准 8 元）/ 关停 CPA 最差创意；合计要放量再加总预算',
   A3: '账户综合成本仅作参考，具体看计划级判定',
   A4: '整户 0 激活：先查监测链接回传，再查落地页',
   A5: '核监测链接 channel_tag 与回调签名，先确认不是回传问题',
@@ -346,14 +419,24 @@ const CODE_ACTION = {
   P5: '成熟期超红线：降出价 10%，仍不达标就关停',
   C1: '关停该创意（消耗已超 36 元且 0 激活，属空耗不属成本）',
   C2: '关停该创意（CPA 已超爬坡容忍线且消耗 ≥36 元）',
-  C3: '提价 17% 抢量，拿到 5000 展示后回调 9 元',
+  C3: '新素材可提到 9 元抢量，跑量后回调 8 元',
   C4: '进淘汰池，不再复投；同素材换钩子文案再试',
   C5: '今晚复投到两户新计划，主力吃量',
+  A7: '按建议调拨两户额度（合计 5000 不变）——不是异常，别急着停投',
 };
 
-function metricsLine(a) {
+function metricsLine(a, alloc) {
   if (a.error) return `${a.tag} · 数据异常（${a.error.slice(0, 40)}）`;
-  return `${a.tag} · 消耗 ${yuan(a.charge)}/${CFG.dailyBudgetYuan}（${((a.charge / CFG.dailyBudgetYuan) * 100).toFixed(1)}%）· 激活 ${a.activation} · CPA ${a.cpa == null ? '—' : yuan(a.cpa)} · 展示 ${a.show} · 点击率 ${pct(a.ctr)}`;
+  const b = Number(alloc || allocOf(a.id)) || CFG.dailyBudgetYuan;
+  return `${a.tag} · 消耗 ${yuan(a.charge)}/额度 ${b}（${((a.charge / b) * 100).toFixed(1)}%）· 激活 ${a.activation} · CPA ${a.cpa == null ? '—' : yuan(a.cpa)} · 展示 ${a.show} · 点击率 ${pct(a.ctr)}`;
+}
+
+function totalLine(metrics) {
+  const ok = metrics.filter((m) => !m.error);
+  const TOTAL = Number(CFG.totalBudgetYuan || CFG.dailyBudgetYuan * CFG.accounts.length);
+  const total = ok.reduce((s, m) => s + (m.charge || 0), 0);
+  const act = ok.reduce((s, m) => s + (m.activation || 0), 0);
+  return `**合计 ${yuan(total)}/${TOTAL}（${((total / TOTAL) * 100).toFixed(1)}%）· 激活 ${act} · 均价 ${act ? yuan(total / act) : '—'}**`;
 }
 
 function buildWatchCard(alerts, metrics, observeCount = 0) {
@@ -362,6 +445,7 @@ function buildWatchCard(alerts, metrics, observeCount = 0) {
   const goods = alerts.filter((x) => x.sev === 'GOOD');
   const head = `### 【快手盯盘】${md()} ${hm()} · 🔴${reds.length} 🟡${yels.length}${goods.length ? ` 🟢${goods.length}` : ''}`;
   const lines = [head, ''];
+  lines.push(totalLine(metrics));
   for (const m of metrics) lines.push(metricsLine(m));
   if (observeCount > 0) lines.push(`_观察期计划 ${observeCount} 条（激活 <${L.observeMaxAct}，成本不判定）_`);
   if (alerts.length) {
@@ -381,7 +465,7 @@ function buildHeartbeatCard(metrics) {
   const total = metrics.reduce((s, m) => s + (m.charge || 0), 0);
   const act = metrics.reduce((s, m) => s + (m.activation || 0), 0);
   const cpa = act > 0 ? total / act : null;
-  const lines = [`### 【快手盯盘】${md()} ${hm()} · 平稳`, '', `合计消耗 ${yuan(total)} 元 · 激活 ${act} · CPA ${cpa == null ? '—' : yuan(cpa)}`];
+  const lines = [`### 【快手盯盘】${md()} ${hm()} · 平稳`, '', totalLine(metrics), `合计激活 ${act} · 均价 ${cpa == null ? '—' : yuan(cpa)}`];
   for (const m of metrics) lines.push(metricsLine(m));
   return lines.join('\n');
 }
@@ -533,7 +617,21 @@ async function watch() {
   for (const a of CFG.accounts) budgets[a.id] = await budgetOf(a.id);
 
   let alerts = [];
+  // 预算动态调拨：每户额度 ≥ 2×消耗（利用率 ≤50%），两户合计 5000 不变
+  try {
+    const budgetActs = await autoBudget.rebalance(metrics, budgets, { hour, dry: DRY });
+    if (budgetActs.length) {
+      for (const a of CFG.accounts) budgets[a.id] = await budgetOf(a.id);
+      for (const b of budgetActs) {
+        alerts.push({ key: `AB-${b.tag}`, sev: 'GOOD', code: 'A7', text: `${b.tag} 日预算已调 ${b.from} → ${b.to} 元（${b.why}）` });
+      }
+    }
+  } catch (e) {
+    log(`预算调拨失败：${e.message}`);
+  }
   for (const m of metrics) alerts = alerts.concat(evalAccount(m, budgets[m.id] || CFG.dailyBudgetYuan, hour, pace));
+  // 两户合计预算 5000（可调拨）：进度 / 撞线 / 结构失衡
+  alerts = alerts.concat(evalTotal(metrics, budgets, hour, pace));
 
   // 授权状态
   const grants = await grantsStatus();
@@ -711,7 +809,7 @@ async function daily() {
     lines.push('', '**建议停止复投**');
     kill.forEach((m) => lines.push(`· ${m.name} · 消耗 ${yuan(m.charge)} · 0 激活`));
   }
-  lines.push('', `**今日动作**：每户上 2 条计划 —— 跑量复投 8–10 条（可用上面名单，重复没关系）+ 新素材 3–5 条；版位只投上下滑大屏，出价 9 元。`);
+  lines.push('', `**今日动作**：每户上 2 条计划 —— 跑量复投 8–10 条（可用上面名单，重复没关系）+ 新素材 3–5 条；版位只投上下滑大屏，出价 8 元（新素材执行器可提到 9）。`);
   // 效果台账：昨日/前日已执行动作的 24h 回看汇总
   try {
     const fx = autoEffects.recentLines(2);
@@ -741,7 +839,7 @@ async function eod() {
   const lines = [
     `### 【快手日终】${md()} 小结`,
     '',
-    `合计消耗 ${yuan(total)} 元 · 激活 ${act} · 均价 ${act ? yuan(total / act) : '—'} · 预算执行 ${((total / (CFG.dailyBudgetYuan * CFG.accounts.length)) * 100).toFixed(1)}%`,
+    `合计消耗 ${yuan(total)} 元 · 激活 ${act} · 均价 ${act ? yuan(total / act) : '—'} · 总预算执行 ${((total / Number(CFG.totalBudgetYuan || CFG.dailyBudgetYuan * CFG.accounts.length)) * 100).toFixed(1)}%`,
   ];
   for (const m of metrics) lines.push(metricsLine(m));
   lines.push('', '明日 09:30 出复盘与基建清单。');
@@ -780,6 +878,10 @@ async function eod() {
     process.exit(bad === 0 ? 0 : 1);
   }
   try {
+    // 先确保后端在线（掉线就自己拉起来），否则整轮巡检都是空的
+    await ensureBackend({ waitSeconds: 60 });
+    // 再确保分钟级守护常驻（被回收了就在这里重新拉起）
+    ensureWatchdog();
     if (MODE === 'daily') await daily();
     else if (MODE === 'eod') await eod();
     else await watch();

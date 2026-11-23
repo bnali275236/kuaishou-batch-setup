@@ -2,7 +2,8 @@
 
 ## 定位与技术栈
 磁力引擎开放平台（MAPI/DSP）批量上计划+盯盘工作台。React18+TS+Vite+AntD5+ECharts / NestJS10+Prisma5+SQLite / `packages/shared` 为枚举·限额·错误分类唯一来源。Electron 直接 fork 后端进程。版本已发行至 **0.6.2**。
-**运行形态（2026-11-06 起）**：主用「网页版」——双击仓库根目录 `启动网页版.cmd`（纯 ASCII，仅调 `node tools/web-launch.cjs`），后者设 `DATA_DIR=%APPDATA%/快手投放工作台` + `WEB_DIST=apps/web/dist` + 迁移 → 启动后端 7801 同源托管前端。数据与桌面版完全同源；**桌面版与网页版不可同时运行**（token 轮换互踢）。停止：`停止网页版.cmd`。
+**运行形态（2026-11-17 起：无窗口后台）**：双击 `启动网页版.cmd`（纯 ASCII，仅调 `node tools/web-launch.cjs`）→ 脚本先把「服务+看护」转交给一个**无可见窗口**的后台进程（PowerShell `Start-Process -WindowStyle Hidden` 起自己带 `--hidden`），自身立即退出 → 黑窗口自动关闭、自动开浏览器。服务已在跑时双击只开网页秒退。`--keep-console` 保留窗口排查。数据 `DATA_DIR=%APPDATA%/快手投放工作台`、`WEB_DIST=apps/web/dist`、7801 同源托管。**桌面版与网页版不可同时运行**（token 轮换互踢）。停止：`停止网页版.cmd`（先 `taskkill /T` 杀 `.runtime/launcher-7801.pid` 的看护树，再杀端口；只杀端口会被守护 6s 拉回）。
+🚫 安全策略禁用 `Add-Type` / `wscript.exe`（LOLBin），别再用它们做窗口隐藏；`schtasks.exe` 在工具沙箱内也被禁。
 ⚠️ 批处理坑：**.cmd 必须纯 ASCII + CRLF 换行**。中文路径/中文提示在 GBK 控制台下会被读花（曾出现 DATA_DIR 静默失效→连到空开发库、前端 404；LF 换行→单词被截断报 `'ishou' 不是内部命令`）。所有中文路径逻辑放 Node 脚本里（Node 固定 UTF-8）。
 已推 Gitee 私有仓库 `Sakura777777/kuaishou-batch-setup`（凭据在 Windows 凭据管理器，直接 git push 即可）。
 **双远端**：`origin`=Gitee、`github`=GitHub 私有 `bnali275236/kuaishou-batch-setup`（本机凭据管理器已有 GitHub PAT，scopes: gist/read:org/repo/workflow，无需再要令牌）。同步命令：`git push origin master && git push github master`。

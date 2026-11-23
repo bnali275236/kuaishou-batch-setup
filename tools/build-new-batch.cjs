@@ -4,9 +4,9 @@
  *
  * 逻辑：
  *  1. 拉两户素材库（/api/plan/assets/videos，含 uploadTime / cost7d）
- *  2. 取「近 3 天上传 + 审核通过 + 从未上过任何计划」的片子，每户最多 5 条
+ *  2. 取「近 7 天上传 + 审核通过 + 从未上过任何计划」的片子，每户最多 5 条（2026-11-11 用户拍板：7 天内上传都算新素材）
  *  3. 有新片 → 每户建 1 条「PZ38x-新素材-MMDD」；没有 → 只推钉钉提醒
- *  4. 出价 9（新片不抢量，先拿学习期数据）；版位 [6]；ocpx 激活 180；安卓
+ *  4. 出价 8（新片先拿学习期数据，执行器可提到 9 上限）；版位 [6]；ocpx 激活 180；安卓
  *
  * 一创意一素材？不——组内多条素材同组便于集中冷启动，与主力计划一致口径。
  * 但每条素材用各自主题的文案，便于归因时看素材名。
@@ -15,6 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const effects = require('./auto-effects.cjs');
+const { ensureBackend } = require('./ensure-backend.cjs');
 
 const CFG = JSON.parse(fs.readFileSync(path.join(__dirname, 'monitor.config.json'), 'utf-8'));
 const DRY = process.argv.includes('--dry');
@@ -187,10 +188,11 @@ async function alreadyDone(name) {
 }
 
 (async () => {
+  await ensureBackend(); // 后端掉线先拉起来，否则后面全是空数据
   const today = ymd();
   const suffix = mmdd();
   const taskName = `新素材-${suffix}（自动）`;
-  const cutoff = Date.now() - 3 * 86400000;
+  const cutoff = Date.now() - 7 * 86400000;
   log(`开始：${taskName}`);
 
   if (await alreadyDone(taskName)) {
@@ -220,21 +222,21 @@ async function alreadyDone(name) {
       .sort((a, b) => String(b.uploadTime || '').localeCompare(String(a.uploadTime || '')))
       .slice(0, 5)
       .map((v) => ({ photoId: String(v.id), name: v.name || String(v.id) }));
-    log(`${acc.tag} 近 3 天新片可用 ${fresh.length} 条`);
+    log(`${acc.tag} 近 7 天新片可用 ${fresh.length} 条`);
     picked.push({ acc, vids: fresh });
   }
 
   const usable = picked.filter((x) => x.vids.length > 0);
   if (usable.length === 0) {
     log('无新素材，跳过建计划');
-    const detail = picked.map((x) => `- ${x.acc.tag}：${x.err ? '拉取失败 ' + x.err : '近 3 天没有未上过计划的新片'}`).join('\n');
+    const detail = picked.map((x) => `- ${x.acc.tag}：${x.err ? '拉取失败 ' + x.err : '近 7 天没有未上过计划的新片'}`).join('\n');
     pushDingtalk(`### 【快手基建·测新】${suffix} 无新素材\n\n${detail}\n\n今日 14:00 测新批次跳过，请编辑尽快出片。`);
     process.exit(0);
   }
 
-  const rows = usable.map((x, i) => buildRow(x.acc.id, x.acc.tag, i + 1, `PZ${x.acc.tag}-新素材-${suffix}`, today, 9, x.vids));
+  const rows = usable.map((x, i) => buildRow(x.acc.id, x.acc.tag, i + 1, `PZ${x.acc.tag}-新素材-${suffix}`, today, 8, x.vids));
   for (const r of rows) {
-    log(`${r.advertiserId} ${r.campaignName}：${r.units[0].videos.length} 条 / 出价 9`);
+    log(`${r.advertiserId} ${r.campaignName}：${r.units[0].videos.length} 条 / 出价 8`);
     r.units[0].videos.forEach((v) => log(`   ${v.name.slice(0, 40)} ← ${v.photoId}`));
   }
 
@@ -266,7 +268,7 @@ async function alreadyDone(name) {
   const issues = [];
   for (const r of rows) {
     if (JSON.stringify(r.sceneIds) !== '[6]') issues.push(`${r.campaignName} 版位异常 ${JSON.stringify(r.sceneIds)}`);
-    if (!(r.cpaBidYuan >= 8 && r.cpaBidYuan <= 10)) issues.push(`${r.campaignName} 出价越界 ${r.cpaBidYuan}`);
+    if (!(r.cpaBidYuan >= 8 && r.cpaBidYuan <= 9)) issues.push(`${r.campaignName} 出价越界 ${r.cpaBidYuan}`);
     for (const v of r.units[0].videos) {
       if (!(COPY[themeOf(v.name)] ?? COPY.ty).includes(v.description)) issues.push(`文案疑似错配：${v.name} ← ${v.description}`);
       if (!v.photoId) issues.push(`素材缺 photoId：${v.name}`);
@@ -304,7 +306,7 @@ async function alreadyDone(name) {
     `### 【快手基建·测新】${suffix} 新素材已上`,
     '',
     `- 任务「${taskName}」：**${['DONE', 'SUCCESS', 'SUCCEEDED'].includes(st) ? '✅ 全部成功' : '⚠️ ' + st}** ${okN}/${totN}`,
-    `- 出价 9 元 · 版位 [6] 上下滑 · ocpx 激活 180 · 安卓`,
+    `- 出价 8 元 · 版位 [6] 上下滑 · ocpx 激活 180 · 安卓`,
   ];
   for (const r of rows) {
     lines.push(`- ${r.advertiserId} ${r.campaignName}：${r.units[0].videos.length} 条`);
@@ -315,7 +317,7 @@ async function alreadyDone(name) {
     fails.slice(0, 6).forEach((f) => lines.push(`- ${f.displayName}：${String(f.error || '').slice(0, 70)}`));
   }
   lines.push('', issues.length ? `**⚠ 自查发现 ${issues.length} 个问题：**\n${issues.slice(0, 6).map((x) => `- ${x}`).join('\n')}` : '✅ 自查通过：版位/出价/文案一致性/计划投放状态全部正常。');
-  lines.push('', '测新计划给 4 小时观察，16:00 看曝光：<1000 提价 10–15%，0 点击的直接关停。');
+  lines.push('', '测新计划给 4 小时观察，16:00 看曝光：<1000 由执行器提到 9 元（上限），0 点击的直接关停。');
   pushDingtalk(lines.join('\n'));
   process.exit(['DONE', 'SUCCESS', 'SUCCEEDED', 'PARTIAL'].includes(st) ? 0 : 1);
 })();

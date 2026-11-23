@@ -1,4 +1,10 @@
-import { PlayCircleOutlined, ReloadOutlined, SyncOutlined } from '@ant-design/icons';
+import {
+  CloudUploadOutlined,
+  PlayCircleOutlined,
+  ReloadOutlined,
+  SearchOutlined,
+  SyncOutlined,
+} from '@ant-design/icons';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import {
   Alert,
@@ -7,7 +13,10 @@ import {
   Card,
   DatePicker,
   Empty,
+  Input,
   Modal,
+  Pagination,
+  Progress,
   Segmented,
   Select,
   Space,
@@ -29,9 +38,10 @@ import type {
   MaterialRow,
   MaterialSyncResult,
 } from '@wkbd/shared';
-import { api, explainError } from '../api/client';
+import { api, explainError, uploadBinary } from '../api/client';
 import { useBoardTable } from '../components/BoardTable';
 import { quickPresets } from '../components/QuickRanges';
+import type { AssetItem } from './plan/pickers';
 
 /**
  * 素材看板 —— 素材维度的数据观察与投放结论输出。
@@ -588,8 +598,428 @@ function MaterialTable({
   );
 }
 
+/* ------------------------------------------------------------------
+ * 素材库面板：账户素材库管理（浏览 / 本地上传 / 平台同步）。
+ * 数据源 = 平台素材库列表（/api/plan/assets/videos），与「素材看板」
+ * 的本地日报库是两回事：这里是「现在账户里有什么素材」。
+ * ------------------------------------------------------------------ */
+
+const VIDEO_MAX_BYTES = 500 * 1024 * 1024;
+
+/** 从平台原始条目里挑出可用地址（photo_url 是视频播放地址，不一定是封面） */
+function videoUrlsOf(item: AssetItem): { cover?: string; video?: string } {
+  const raw = (item.raw ?? {}) as Record<string, unknown>;
+  const pick = (...keys: string[]): string | undefined => {
+    for (const k of keys) {
+      const v = raw[k];
+      if (typeof v === 'string' && v) return v;
+    }
+    return undefined;
+  };
+  const imageLike = (u?: string) => /\.(jpe?g|png|webp|gif)(\?|#|$)/i.test(u ?? '');
+  const videoLike = (u?: string) => /\.(mp4|mov|webm)(\?|#|$)/i.test(u ?? '');
+  const cover = pick('cover_url', 'image_url', 'poster_url') ?? (imageLike(item.cover) ? item.cover : undefined);
+  const video =
+    (videoLike(item.cover) ? item.cover : undefined) ??
+    (videoLike(raw.photo_url as string) ? (raw.photo_url as string) : pick('photo_url'));
+  return { cover, video };
+}
+
+/** 素材库详情弹窗：视频播放 + 基本信息 */
+function LibraryPreviewModal({ item, onClose }: { item: AssetItem | null; onClose: () => void }) {
+  const { cover, video } = item ? videoUrlsOf(item) : { cover: undefined, video: undefined };
+  return (
+    <Modal
+      open={Boolean(item)}
+      title={item?.name ?? '素材详情'}
+      onCancel={onClose}
+      footer={null}
+      width={640}
+      destroyOnClose
+    >
+      {item && (
+        <div style={{ display: 'flex', gap: 16 }}>
+          <div style={{ width: 240, flex: 'none' }}>
+            {video ? (
+              <video
+                src={video}
+                poster={cover}
+                controls
+                style={{ width: '100%', borderRadius: 8, background: '#000' }}
+              />
+            ) : cover ? (
+              <img src={cover} alt="" style={{ width: '100%', borderRadius: 8 }} />
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="平台未返回预览地址" />
+            )}
+          </div>
+          <Space direction="vertical" size={6} style={{ flex: 1 }}>
+            <div>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                素材 ID
+              </Typography.Text>
+              <div style={{ fontFamily: 'ui-monospace, Consolas, monospace', wordBreak: 'break-all' }}>
+                {item.id}
+              </div>
+            </div>
+            {item.uploadTime && (
+              <div>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  上传时间
+                </Typography.Text>
+                <div>{item.uploadTime}</div>
+              </div>
+            )}
+            <div>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                消耗（今日 / 昨日 / 近 7 天）
+              </Typography.Text>
+              <div>
+                {item.costToday != null || item.costYesterday != null || item.cost7d != null
+                  ? `¥${fmtMoney(item.costToday ?? 0)} / ¥${fmtMoney(item.costYesterday ?? 0)} / ¥${fmtMoney(item.cost7d ?? 0)}`
+                  : '—'}
+              </div>
+            </div>
+          </Space>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function MaterialLibraryPanel({ accounts }: { accounts: AccountSummary[] }) {
+  const { modal, message } = App.useApp();
+
+  /* 账户：单选，上传目标 = 该账户素材库；代投白名单账户禁止上传 */
+  const [advertiserId, setAdvertiserId] = useState('');
+  useEffect(() => {
+    if (!advertiserId && accounts.length > 0) {
+      const first = accounts.find((a) => !a.readOnly) ?? accounts[0];
+      setAdvertiserId(first.advertiserId);
+    }
+  }, [accounts, advertiserId]);
+  const current = accounts.find((a) => a.advertiserId === advertiserId);
+  const writable = Boolean(current && !current.readOnly);
+
+  const listQuery = useQuery<AssetItem[]>({
+    queryKey: ['material-library', advertiserId],
+    queryFn: () => api.get<AssetItem[]>(`/api/plan/assets/videos?advertiserId=${advertiserId}`),
+    enabled: Boolean(advertiserId),
+  });
+
+  const [syncing, setSyncing] = useState(false);
+  const syncVideos = async () => {
+    if (!advertiserId) return;
+    setSyncing(true);
+    try {
+      await api.get<AssetItem[]>(`/api/plan/assets/videos?advertiserId=${advertiserId}&force=1`);
+      message.success('已从平台同步最新素材库');
+    } catch (err) {
+      modal.error({ title: '同步素材失败', content: explainError(err) });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  /* 本地上传（与创编页「选择素材」弹窗同一接口：裸二进制直传账户素材库） */
+  const [uploading, setUploading] = useState(false);
+  const [percent, setPercent] = useState(0);
+  const [uploadName, setUploadName] = useState('');
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const handleFile = async (file: File | undefined) => {
+    if (!file) return;
+    if (!advertiserId) {
+      message.warning('请先选择账户，再上传素材');
+      return;
+    }
+    if (file.size > VIDEO_MAX_BYTES) {
+      message.error(`文件 ${(file.size / 1024 / 1024).toFixed(1)}MB，超过 500MB 上限`);
+      return;
+    }
+    if (!/\.(mp4|mov|webm)$/i.test(file.name)) {
+      message.error('只支持 mp4 / mov / webm 视频文件');
+      return;
+    }
+    setUploading(true);
+    setPercent(0);
+    setUploadName(file.name);
+    try {
+      const name = file.name.replace(/\.[^.]+$/, '').slice(0, 50);
+      const res = await uploadBinary<{ photoId: string; sizeBytes: number }>(
+        `/api/plan/assets/videos/upload?advertiserId=${encodeURIComponent(
+          advertiserId,
+        )}&name=${encodeURIComponent(name)}`,
+        file,
+        { fileName: file.name, onProgress: (p) => setPercent(p.percent) },
+      );
+      message.success(`「${name}」已上传到账户素材库`);
+      void listQuery.refetch();
+      setPreviewId(res.photoId);
+    } catch (err) {
+      modal.error({ title: '上传失败', content: explainError(err) });
+    } finally {
+      setUploading(false);
+      setPercent(0);
+      setUploadName('');
+    }
+  };
+
+  /* 筛选：关键词 + 排序；数据量大时分页 */
+  const [keyword, setKeyword] = useState('');
+  const [sortBy, setSortBy] = useState<'uploadTime' | 'cost7d' | 'costToday'>('uploadTime');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(30);
+  const [previewId, setPreviewId] = useState<string | null>(null);
+  const previewItem = useMemo(
+    () => (listQuery.data ?? []).find((v) => v.id === previewId) ?? null,
+    [listQuery.data, previewId],
+  );
+
+  useEffect(() => {
+    setPage(1);
+  }, [keyword, sortBy, advertiserId]);
+
+  const filtered = useMemo(() => {
+    const kw = keyword.trim().toLowerCase();
+    const num = (x: number | undefined) => (x === undefined ? -1 : x);
+    return (listQuery.data ?? [])
+      .filter((v) => !kw || v.name.toLowerCase().includes(kw) || v.id.includes(kw))
+      .sort((a, b) =>
+        sortBy === 'uploadTime'
+          ? (b.uploadTime ?? '').localeCompare(a.uploadTime ?? '')
+          : num(b[sortBy]) - num(a[sortBy]),
+      );
+  }, [listQuery.data, keyword, sortBy]);
+
+  const pageItems = filtered.slice((page - 1) * pageSize, page * pageSize);
+  /** 封面加载失败表：key = photoId，用于把破图占位成「无封面」 */
+  const [brokenCovers, setBrokenCovers] = useState<Record<string, boolean>>({});
+
+  const accountOptions = accounts.map((a) => ({
+    value: a.advertiserId,
+    label: `${a.accountName ?? '未命名账户'}（${a.advertiserId}）${a.readOnly ? ' · 只读' : ''}`,
+  }));
+
+  return (
+    <Card size="small">
+      {/* 工具条：账户 + 上传 + 同步 + 搜索 + 排序 */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+        <Select
+          showSearch
+          optionFilterProp="label"
+          style={{ minWidth: 260, maxWidth: 420, flex: '1 1 260px' }}
+          placeholder="选择账户"
+          value={advertiserId || undefined}
+          onChange={setAdvertiserId}
+          options={accountOptions}
+          disabled={accounts.length === 0}
+        />
+        <input
+          ref={fileRef}
+          type="file"
+          accept="video/mp4,video/quicktime,video/webm"
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            e.currentTarget.value = '';
+            void handleFile(f);
+          }}
+        />
+        <Button
+          type="primary"
+          icon={<CloudUploadOutlined />}
+          loading={uploading}
+          disabled={!writable}
+          title={
+            writable
+              ? '从本机选择视频，上传到该账户素材库'
+              : current?.readOnly
+                ? '该账户在代投白名单内，禁止上传'
+                : '先选择账户'
+          }
+          onClick={() => fileRef.current?.click()}
+        >
+          {uploading ? '上传中' : '上传本地视频'}
+        </Button>
+        <Button icon={<SyncOutlined />} loading={syncing} disabled={!advertiserId} onClick={() => void syncVideos()}>
+          同步素材
+        </Button>
+        <Button icon={<ReloadOutlined />} loading={listQuery.isFetching} disabled={!advertiserId} onClick={() => void listQuery.refetch()}>
+          刷新
+        </Button>
+        <Input
+          allowClear
+          prefix={<SearchOutlined style={{ color: '#B8B5AC' }} />}
+          placeholder="搜索素材名称或 ID"
+          style={{ width: 200 }}
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+        />
+        <Select
+          style={{ width: 180 }}
+          value={sortBy}
+          onChange={(v) => setSortBy(v as typeof sortBy)}
+          options={[
+            { value: 'uploadTime', label: '按上传时间 新→旧' },
+            { value: 'cost7d', label: '按近7天消耗 高→低' },
+            { value: 'costToday', label: '按今日消耗 高→低' },
+          ]}
+        />
+      </div>
+
+      {uploading && (
+        <div style={{ marginBottom: 10 }}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            正在上传 {uploadName} 到账户素材库（大文件请勿关闭页面）
+          </Typography.Text>
+          <Progress percent={percent} size="small" status="active" />
+        </div>
+      )}
+
+      <Typography.Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 8 }}>
+        这里是账户素材库（平台实时列表），共 {filtered.length} 个素材；消耗为素材维度实时口径，平台仅开放近 7 天。
+        上传后即可在「上计划 → 选择素材」里直接勾选使用。
+      </Typography.Text>
+
+      {listQuery.isLoading ? (
+        <div style={{ textAlign: 'center', padding: 40 }}>
+          <Spin />
+        </div>
+      ) : filtered.length === 0 ? (
+        <Empty
+          description={
+            (listQuery.data ?? []).length === 0
+              ? '该账户素材库为空，先点「同步素材」从平台拉取，或直接「上传本地视频」'
+              : '没有符合搜索条件的素材'
+          }
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          style={{ padding: 32 }}
+        />
+      ) : (
+        <>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(128px, 1fr))',
+              gap: 10,
+            }}
+          >
+            {pageItems.map((v) => {
+              const { cover } = videoUrlsOf(v);
+              const broken = Boolean(brokenCovers[v.id]);
+              return (
+                <div
+                  key={v.id}
+                  onClick={() => setPreviewId(v.id)}
+                  style={{
+                    cursor: 'pointer',
+                    border: '1px solid #E8E6E1',
+                    borderRadius: 8,
+                    overflow: 'hidden',
+                    background: '#fff',
+                  }}
+                  title={`${v.name || v.id}（点击预览）`}
+                >
+                  <div style={{ position: 'relative', height: 140, background: '#F5F4F0' }}>
+                    {cover && !broken ? (
+                      <img
+                        src={cover}
+                        alt={v.name || v.id}
+                        onError={() => setBrokenCovers((m) => ({ ...m, [v.id]: true }))}
+                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                        loading="lazy"
+                      />
+                    ) : (
+                      <div
+                        style={{
+                          width: '100%',
+                          height: '100%',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          color: '#B8B5AC',
+                          fontSize: 12,
+                        }}
+                      >
+                        无封面
+                      </div>
+                    )}
+                    <PlayCircleOutlined
+                      style={{
+                        position: 'absolute',
+                        bottom: 4,
+                        right: 5,
+                        fontSize: 16,
+                        color: '#fff',
+                        filter: 'drop-shadow(0 0 2px rgba(0,0,0,.85))',
+                      }}
+                    />
+                  </div>
+                  <div style={{ padding: '6px 8px' }}>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                      title={v.name || v.id}
+                    >
+                      {v.name || v.id}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#888780', marginTop: 2 }}>
+                      {v.uploadTime ? v.uploadTime.slice(0, 10) : '—'}
+                      {v.cost7d != null && v.cost7d > 0 ? ` · 7天 ¥${v.cost7d >= 100 ? Math.round(v.cost7d) : v.cost7d.toFixed(2)}` : ''}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
+            <Pagination
+              size="small"
+              current={page}
+              pageSize={pageSize}
+              total={filtered.length}
+              showSizeChanger
+              pageSizeOptions={[30, 60, 120]}
+              showTotal={(t) => `共 ${t} 条`}
+              onChange={(p, ps) => {
+                setPage(p);
+                setPageSize(ps);
+              }}
+            />
+          </div>
+        </>
+      )}
+
+      <LibraryPreviewModal item={previewItem} onClose={() => setPreviewId(null)} />
+    </Card>
+  );
+}
+
+/** 一级面板切换，记住用户上次停留在哪 */
+const CENTER_VIEW_KEY = 'wkbd_material_center_view';
+
 export default function MaterialBoardPage() {
   const { modal, message } = App.useApp();
+
+  const [view, setView] = useState<'board' | 'library'>(() => {
+    try {
+      return localStorage.getItem(CENTER_VIEW_KEY) === 'library' ? 'library' : 'board';
+    } catch {
+      return 'board';
+    }
+  });
+  const switchView = (v: 'board' | 'library') => {
+    setView(v);
+    try {
+      localStorage.setItem(CENTER_VIEW_KEY, v);
+    } catch {
+      /* 存不了就算了，不影响切换 */
+    }
+  };
 
   const { data: accounts } = useQuery<AccountSummary[]>({
     queryKey: ['material-accounts'],
@@ -812,15 +1242,29 @@ export default function MaterialBoardPage() {
   return (
     <div>
       <div className="page-header">
-        <h2>素材看板</h2>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+          <h2 style={{ margin: 0 }}>素材中心</h2>
+          <Segmented
+            value={view}
+            onChange={(v) => switchView(v as 'board' | 'library')}
+            options={[
+              { value: 'board', label: '素材看板' },
+              { value: 'library', label: '素材库' },
+            ]}
+          />
+        </div>
         <p>
-          覆盖全部账户的全部素材。历史数据取自本地永久库 —— 平台实时报表只开放近 7 天，
-          工作台每天自动同步并永久保留，因此可长期回溯与分析；今日数据为平台实时值。
-          点素材行可展开查看该素材在各账户下的明细。
+          {view === 'board'
+            ? '覆盖全部账户的全部素材。历史数据取自本地永久库 —— 平台实时报表只开放近 7 天，工作台每天自动同步并永久保留，因此可长期回溯与分析；今日数据为平台实时值。点素材行可展开查看该素材在各账户下的明细。'
+            : '账户素材库管理：浏览平台素材、上传本地视频到账户素材库。上传的素材可直接在「上计划 → 选择素材」里勾选使用。'}
         </p>
       </div>
 
-      <Card size="small" style={{ marginBottom: 12 }}>
+      {view === 'library' ? (
+        <MaterialLibraryPanel accounts={usable} />
+      ) : (
+        <>
+          <Card size="small" style={{ marginBottom: 12 }}>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }}>
           <Select
             mode="multiple"
@@ -917,9 +1361,13 @@ export default function MaterialBoardPage() {
             { key: 'today', label: '今日数据（实时）', children: panel(today, 'today') },
           ]}
         />
-      </Spin>
+          </Spin>
+        </>
+      )}
 
-      <MaterialPreviewModal row={preview} rangeText={rangeText} onClose={() => setPreview(null)} />
+      {view === 'board' && (
+        <MaterialPreviewModal row={preview} rangeText={rangeText} onClose={() => setPreview(null)} />
+      )}
     </div>
   );
 }

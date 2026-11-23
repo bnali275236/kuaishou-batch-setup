@@ -172,12 +172,17 @@ export interface CardForm {
   namePrefix: string;
   /** 广告类型（计划 ad_type）：0 展示（信息流）/ 1 搜索（本期未实现） */
   adType: number;
-  /** 投放方式：normal 常规 / auto 全自动（auto_manage，白名单） */
+  /** 投放模式：normal 常规 / auto 全自动（auto_manage，白名单）——只在计划层配置 */
   putMode: 'normal' | 'auto';
   /** 全自动投放：周期稳投（计划级 periodic_delivery_type，白名单特性，真实下发） */
   cycleStable: boolean;
   /** 周期稳投-投放周期（periodic_days）：官方默认 7 天，加白后支持 5 天 */
   stableDays: number;
+  /** 周期稳投-投放日期口径：preset 预设天数（periodic_days）/ custom 自定义日期区间 */
+  stablePeriodMode: 'preset' | 'custom';
+  /** 周期稳投-自定义投放日期（开始/结束，yyyy-MM-dd） */
+  stableCustomBegin: string;
+  stableCustomEnd: string;
   /** 周期稳投-续投（continue_period_type） */
   stableRenew: boolean;
   /** 全自动投放：广告组命名规则模板，支持通配符 [序号]/[日期]/[时间] */
@@ -351,19 +356,39 @@ function splitAcross<T>(items: T[], k: number): T[][] {
 }
 
 /**
+ * 营销目标（计划层，对应创建计划接口的 type）——对齐官网「新建标准推广」第一屏。
+ * 只有链路已打通的目标可选，其余置灰保留入口（后端 mapper 尚无对应参数）。
+ */
+const MARKETING_GOAL_OPTIONS: Array<{
+  value: number;
+  label: string;
+  disabled?: boolean;
+  tip?: string;
+}> = [
+  { value: 2, label: '推广应用', tip: '应用下载 / 应用唤起（提升应用安装、提升应用活跃）' },
+  { value: 5, label: '销售线索收集', tip: '落地页收集表单/线索' },
+  { value: 16, label: '直播推广', disabled: true, tip: '暂未接入：需直播链路参数' },
+  { value: 4, label: '品牌活动推广', disabled: true, tip: '暂未接入' },
+  { value: 35, label: '电商下单推广', disabled: true, tip: '暂未接入：需商品库/小店授权' },
+  { value: 19, label: '小程序推广', disabled: true, tip: '暂未接入' },
+  { value: 1, label: '快手号推广', disabled: true, tip: '暂未接入' },
+];
+
+/**
  * 校验字段 → 出错表单所在位置。
  * - 对应编辑抽屉字段：定位时打开抽屉并高亮 fld-<field> 的表单项；
  * - null：素材类问题（创意组卡片本身就是问题点，只滚动高亮卡片）；
  * - 未登记的字段：只滚动高亮创意组卡片（保守兜底）。
  */
 const FIELD_DRAWER: Record<string, 'campaign' | 'group' | 'target' | 'creative' | 'conversion' | null> = {
-  // 广告计划基本信息（计划层：类型/广告类型/投放方式/周期稳投）
+  // 广告计划基本信息（计划层：营销目标/推广场景/广告类型/投放模式/竞价策略/计划预算/命名）
   campaignName: 'campaign',
   adType: 'campaign',
   putMode: 'campaign',
   campaignType: 'campaign',
-  // 广告组基本信息（竞价/预算/排期/版位/命名）
-  campaignDayBudgetYuan: 'group',
+  bidStrategy: 'campaign',
+  campaignDayBudgetYuan: 'campaign',
+  // 广告组基本信息（出价/预算/排期/版位/命名）
   unitName: 'group',
   creativeName: 'creative', // 创意名由「广告创意命名规则」配置，配置在创意基本信息抽屉
   // 转化路径（应用/落地页）
@@ -414,8 +439,10 @@ export function PlanCardMode(props: {
   strategyRef?: React.MutableRefObject<(CardForm & { __videos?: string[] }) | null>;
   /** 策略组载入：token 变化时把 form 整体恢复到卡片模式（含已选素材 id） */
   loadSignal?: { token: number; form: Partial<CardForm> & { __videos?: string[] } } | null;
+  /** 营销目标改在「广告计划基本信息」里选，改动需同步回页面级状态（任务头/链路参数都用它） */
+  onCampaignTypeChange?: (code: number) => void;
 }) {
-  const { campaignType, accounts, hasRows, onGenerate, locate, strategyRef, loadSignal } = props;
+  const { campaignType, accounts, hasRows, onGenerate, locate, strategyRef, loadSignal, onCampaignTypeChange } = props;
   const queryClient = useQueryClient();
   const { message, modal } = App.useApp();
 
@@ -426,6 +453,9 @@ export function PlanCardMode(props: {
     putMode: 'normal',
     cycleStable: false,
     stableDays: 7,
+    stablePeriodMode: 'preset',
+    stableCustomBegin: '',
+    stableCustomEnd: '',
     stableRenew: false,
     unitNameTpl: '',
     creativeNameSameAsMaterial: false,
@@ -507,6 +537,30 @@ export function PlanCardMode(props: {
   /* ---------------- 策略组：表单快照上报 / 载入（effect 在 selectedVideos 声明后） ---------------- */
 
   const isAppGoal = campaignType === 2 || campaignType === 7;
+
+  /** 推广场景：应用下载（提升应用安装 type=2）/ 应用唤起（提升应用活跃 type=7） */
+  const promotionScene: 'download' | 'awaken' = campaignType === 7 ? 'awaken' : 'download';
+
+  /** 营销目标切换（计划层 chips）：同步页面级状态，并把优化目标重置为该目标的默认值 */
+  const changeMarketingGoal = (next: number) => {
+    if (next === campaignType) return;
+    onCampaignTypeChange?.(next);
+    patch({ ocpxActionType: defaultRow(next, form.advertiserId || '', 0).ocpxActionType ?? null });
+  };
+
+  /** 周期稳投自定义日期 → 天数（含首尾）；不足 1 天返回 null，回退预设天数 */
+  const stableCustomDays =
+    form.stableCustomBegin && form.stableCustomEnd
+      ? dayjs(form.stableCustomEnd).diff(dayjs(form.stableCustomBegin), 'day') + 1
+      : null;
+  const useCustomPeriod =
+    form.stablePeriodMode === 'custom' && stableCustomDays != null && stableCustomDays > 0;
+  const effectiveStableDays = useCustomPeriod ? (stableCustomDays as number) : form.stableDays;
+  /** 周期稳投真正生效：全自动 + 已开启 + 展示广告（搜索广告无此区块） */
+  const stableActive = form.putMode === 'auto' && form.cycleStable && form.adType === 0;
+  /** 实际投放开始日：周期稳投自定义区间优先，否则取排期开始日 */
+  const effectiveBeginTime =
+    stableActive && useCustomPeriod ? form.stableCustomBegin : form.beginTime;
 
   /** 版位互斥：优选(1)与其他具体版位不能同时选 */
   const toggleScenes = (next: number[]) => {
@@ -1233,7 +1287,7 @@ export function PlanCardMode(props: {
     const applyTpl = (tpl: string, seq: number) =>
       (tpl.trim() || `${namePrefixForAccount}-[序号]`)
         .replaceAll('[序号]', String(seq))
-        .replaceAll('[日期]', form.beginTime || today())
+        .replaceAll('[日期]', effectiveBeginTime || today())
         .replaceAll('[时间]', new Date().toTimeString().slice(0, 5).replace(':', ''))
         .replaceAll('[账户ID]', advertiserId)
         .replaceAll('[账户备注]', account.accountName ?? advertiserId)
@@ -1305,23 +1359,18 @@ export function PlanCardMode(props: {
         campaignBidType: form.bidStrategy,
         autoManage: form.putMode === 'auto' ? 1 : 0,
         // 周期稳投（全自动 + 白名单，仅展示广告有——创量实测搜索广告无此区块）：
-        // 真实下发 periodic_delivery_type 族字段
-        periodicDeliveryType:
-          form.putMode === 'auto' && form.cycleStable && form.adType === 0 ? 1 : null,
-        periodicDays:
-          form.putMode === 'auto' && form.cycleStable && form.adType === 0
-            ? form.stableDays
-            : null,
-        continuePeriodType:
-          form.putMode === 'auto' && form.cycleStable && form.adType === 0
-            ? form.stableRenew
-              ? 2
-              : 1
-            : null,
-        rangeBudgetYuan:
-          form.putMode === 'auto' && form.cycleStable && form.adType === 0
-            ? form.cycleBudgetYuan
-            : null,
+        // 真实下发 periodic_delivery_type 族字段；自定义日期口径按「天数差」折算 periodic_days
+        periodicDeliveryType: stableActive ? 1 : null,
+        // 预设天数直传；自定义区间官方 periodic_days 仅认 2~7 天，超出则只按起止日期投放
+        periodicDays: stableActive
+          ? useCustomPeriod
+            ? effectiveStableDays >= 2 && effectiveStableDays <= 7
+              ? effectiveStableDays
+              : null
+            : form.stableDays
+          : null,
+        continuePeriodType: stableActive ? (form.stableRenew ? 2 : 1) : null,
+        rangeBudgetYuan: stableActive ? form.cycleBudgetYuan : null,
         campaignDayBudgetYuan:
           form.budgetMode === 'unified' ? form.campaignDayBudgetYuan : null,
         // 组层：最大转化 = MCB（bid_type=12），平台智能出价，不传出价
@@ -1335,8 +1384,13 @@ export function PlanCardMode(props: {
         // 搜索广告版位固定 scene_id=39；信息流按智能优选/手动选择
         sceneIds: form.adType === 1 ? [39] : form.sceneMode === 1 ? [1] : [...form.sceneIds],
         showMode: form.showMode,
-        beginTime: form.beginTime,
-        endTime: form.scheduleMode === 'custom' && form.endTime ? form.endTime : null,
+        beginTime: effectiveBeginTime,
+        endTime:
+          stableActive && useCustomPeriod
+            ? form.stableCustomEnd
+            : form.scheduleMode === 'custom' && form.endTime
+              ? form.endTime
+              : null,
         scheduleTime: form.timeMode === 'custom' ? boolToSeries(form.timeSeries) : null,
         unitDayBudgetYuan: form.unitDayBudgetYuan,
         gender: form.gender,
@@ -1589,10 +1643,10 @@ export function PlanCardMode(props: {
   /* ---------------- 摘要文案 ---------------- */
 
   const bidTypeLabel = maxConvert
-    ? '最大转化（平台智能出价）'
+    ? '平台托管（MCB，不填出价）'
     : form.bidType === 2
       ? 'CPC（按点击）'
-      : 'oCPM（按展示付费）';
+      : 'oCPM（按转化）';
 
   const bidValueText = maxConvert
     ? '—'
@@ -1617,7 +1671,33 @@ export function PlanCardMode(props: {
   const budgetText =
     form.budgetMode === 'unlimited'
       ? '不限'
-      : `计划 ${form.campaignDayBudgetYuan ?? '?'} 元${form.unitDayBudgetYuan ? ` / 组 ${form.unitDayBudgetYuan} 元` : ''}`;
+      : form.campaignDayBudgetYuan != null
+        ? `${form.campaignDayBudgetYuan} 元 / 天`
+        : '统一预算（未填）';
+
+  const unitBudgetText =
+    form.unitDayBudgetYuan != null && form.unitDayBudgetYuan > 0
+      ? `${form.unitDayBudgetYuan} 元 / 天`
+      : '不限';
+
+  /** 周期稳投摘要：预设天数 / 自定义区间 · 续投 · 周期总预算 */
+  const stableText = !form.cycleStable
+    ? '关闭'
+    : [
+        useCustomPeriod
+          ? `${form.stableCustomBegin} ~ ${form.stableCustomEnd}（${effectiveStableDays} 天）`
+          : `${effectiveStableDays} 天`,
+        form.stableRenew ? '到期续投' : null,
+        form.cycleBudgetYuan != null ? `周期总预算 ${form.cycleBudgetYuan} 元` : null,
+      ]
+        .filter(Boolean)
+        .join(' · ');
+
+  const promotionSceneText = isAppGoal
+    ? promotionScene === 'awaken'
+      ? '应用唤起（提升应用活跃）'
+      : '应用下载（提升应用安装）'
+    : null;
 
   const scheduleText =
     form.scheduleMode === 'long'
@@ -1683,6 +1763,11 @@ export function PlanCardMode(props: {
             <Tag color="orange" style={{ marginInlineEnd: 0 }}>
               {CAMPAIGN_TYPE[campaignType]}
             </Tag>
+            {isAppGoal && (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {promotionScene === 'awaken' ? '应用唤起' : '应用下载'} · 在下方「广告计划基本信息」中修改
+              </Typography.Text>
+            )}
           </Space>
           {CAMPAIGN_TYPE_META[campaignType]?.note && (
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -1692,21 +1777,12 @@ export function PlanCardMode(props: {
         </Space>
       </Card>
 
-      {/* ——— 摘要卡（两列栅格：参考创量单屏布局） ——— */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-          gap: 12,
-          alignItems: 'start',
-        }}
-      >
-      {/* ——— 摘要卡：广告计划基本信息（计划层：命名/类型/投放方式/周期稳投） ——— */}
+      {/* ——— 摘要卡（CSS 多列瀑布流：卡片按内容高度自动分栏，不留大块空白） ——— */}
+      <div style={{ columnCount: 2, columnGap: 12 }}>
+      {/* ——— 摘要卡：广告计划基本信息（计划层：营销目标/推广场景/广告类型/投放模式/计划设置/命名） ——— */}
       <SummaryCard title="广告计划基本信息" onEdit={() => openDrawer('campaign')}>
-        <SumItem
-          k="计划类型"
-          v={form.campaignTypeLabel.trim() || '未填（默认名不含类型段）'}
-        />
+        <SumItem k="营销目标" v={CAMPAIGN_TYPE[campaignType] ?? String(campaignType)} />
+        {promotionSceneText && <SumItem k="推广场景" v={promotionSceneText} />}
         <SumItem
           k="广告类型"
           v={
@@ -1717,23 +1793,22 @@ export function PlanCardMode(props: {
               : '搜索广告'
           }
         />
-        <SumItem k="投放方式" v={form.putMode === 'normal' ? '常规投放' : '全自动投放'} />
-        {form.putMode === 'auto' && form.adType === 0 && (
+        <SumItem k="投放模式" v={form.putMode === 'normal' ? '常规投放' : '全自动投放'} />
+        {form.putMode === 'auto' && (
           <SumItem
             k="周期稳投"
-            v={
-              form.cycleStable
-                ? `开启（${form.stableDays}天${form.stableRenew ? '·续投' : ''}${form.cycleBudgetYuan != null ? `·总预算${form.cycleBudgetYuan}元` : ''}）`
-                : '关闭'
-            }
+            v={form.adType === 1 ? '搜索广告不支持' : stableText}
           />
         )}
+        <SumItem k="竞价策略" v={form.bidStrategy === 1 ? '最大转化（平台托管出价）' : '成本优先'} />
+        <SumItem k="计划日预算" v={budgetText} />
         <SumItem
           k="计划命名"
           v={
             [
               form.campaignTypeLabel.trim() || null,
               form.adType === 1 ? '搜索' : form.sceneMode === 1 ? '智能优选' : null,
+              ocpxLabel,
               '…-日期时分秒-序号',
             ]
               .filter(Boolean)
@@ -1764,8 +1839,8 @@ export function PlanCardMode(props: {
           />
         )}
         <SumItem k="投放位置" v={sceneText} />
-        <SumItem k="竞价策略" v={bidTypeLabel} />
         <SumItem k="优化目标" v={ocpxLabel ?? (maxConvert ? '转化数（平台智能）' : '未选择')} />
+        <SumItem k="出价类型" v={bidTypeLabel} />
         {ocpxValid && <SumItem k="ROI 系数" v={String(form.roiRatio ?? '未填')} />}
         <SumItem k="深度转化" v={deepLabel ?? '不开启'} />
         <SumItem k="投放平台" v={platformText} />
@@ -1776,7 +1851,7 @@ export function PlanCardMode(props: {
             v={form.useAppMarket ? `优先商店下载（${form.appStores.length} 个）` : '不开启'}
           />
         )}
-        <SumItem k="每日预算" v={budgetText} />
+        <SumItem k="组日预算" v={unitBudgetText} />
         <SumItem k="排期" v={scheduleText} />
         <SumItem k="投放时段" v={timeText} />
         <SumItem
@@ -2405,30 +2480,9 @@ export function PlanCardMode(props: {
           </div>
         }
       >
-        <FormRow label="投放方式">
-          <Space direction="vertical" size={6} style={{ width: '100%' }}>
-            <ChipGroup
-              value={form.putMode}
-              onChange={(v) => {
-                if (v === 'auto') {
-                  // 对齐 mobgi：全自动投放由系统接管预算，统一预算不可用
-                  patch({ putMode: 'auto', budgetMode: 'unlimited' });
-                } else {
-                  patch({ putMode: 'normal' });
-                }
-              }}
-              options={[
-                { value: 'normal', label: '常规投放' },
-                { value: 'auto', label: '全自动投放', tip: 'auto_manage（UAX），白名单功能，需账户已开通' },
-              ]}
-            />
-            {form.putMode === 'auto' && (
-              <Typography.Text type="warning" style={{ fontSize: 12 }}>
-                平台投放模式升级中，常规投放模式将逐步下线；全自动投放由系统全面接管优化，助力跑量。
-              </Typography.Text>
-            )}
-          </Space>
-        </FormRow>
+        <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 12 }}>
+          投放模式、竞价策略、计划预算与营销目标都在「广告计划基本信息」里配置；这里只配组层参数。
+        </Typography.Text>
 
         {form.putMode === 'auto' && (
           <FormRow
@@ -2533,52 +2587,7 @@ export function PlanCardMode(props: {
           </FormRow>
         )}
 
-        <FormRow label="竞价策略">
-          <Space direction="vertical" size={8} style={{ width: '100%' }}>
-            <ChipGroup
-              value={form.bidStrategy}
-              onChange={(v) => patch({ bidStrategy: v as 0 | 1 })}
-              options={[
-                { value: 0, label: '成本优先' },
-                {
-                  value: 1,
-                  label: '最大转化',
-                  disabled: maxConvertBlocked,
-                  tip: maxConvertBlocked
-                    ? '当计划预算为不限时，不支持选择最大转化，请先将预算改为「统一预算」'
-                    : '平台智能出价，无需填写出价',
-                },
-              ]}
-            />
-            {maxConvert && (
-              <Alert
-                type="warning"
-                showIcon
-                message="最大转化为平台智能出价：无需填写出价；请确保计划日预算已填写。"
-              />
-            )}
-          </Space>
-        </FormRow>
-
-        {form.putMode === 'auto' && form.cycleStable && (
-          <FormRow
-            label="周期总预算"
-            tip="range_budget：系统在稳投周期内的总消耗上限，仅稳投开启时生效（官方要求 ≥3500 元）"
-          >
-            <InputNumber
-              style={{ width: 160 }}
-              min={0}
-              step={100}
-              addonAfter="元"
-              placeholder="周期总预算"
-              value={form.cycleBudgetYuan ?? undefined}
-              onChange={(v) => patch({ cycleBudgetYuan: v })}
-            />
-          </FormRow>
-        )}
-
-        {!maxConvert && (
-          <FormRow label="出价类型">
+        <FormRow label="出价类型">
             <Space size={12} wrap>
               <ChipGroup
                 value={form.bidType}
@@ -2593,7 +2602,6 @@ export function PlanCardMode(props: {
               )}
             </Space>
           </FormRow>
-        )}
 
         {!maxConvert && form.bidType === 2 && (
           <FormRow
@@ -2932,73 +2940,28 @@ export function PlanCardMode(props: {
         )}
 
         <FormRow
-          label="每日预算"
-          rowId="fld-campaignDayBudgetYuan"
-          flash={flashField === 'campaignDayBudgetYuan' || flashField === 'unitDayBudgetYuan'}
+          label="广告组日预算"
+          tip="组的日消耗上限，留空 = 不限。计划层日预算在「广告计划基本信息 → 计划设置」里配置"
+          rowId="fld-unitDayBudgetYuan"
+          flash={flashField === 'unitDayBudgetYuan'}
         >
-          <Space direction="vertical" size={8} style={{ width: '100%' }}>
-            <ChipGroup
-              value={form.budgetMode}
-              onChange={(v) =>
-                patch({ budgetMode: v as 'unlimited' | 'unified' })
-              }
-              options={[
-                { value: 'unlimited', label: '不限' },
-                {
-                  value: 'unified',
-                  label: '统一预算',
-                  disabled: form.putMode === 'auto',
-                  tip:
-                    form.putMode === 'auto'
-                      ? '全自动投放由系统接管预算，不支持统一预算'
-                      : maxConvert
-                        ? undefined
-                        : '选择统一预算后可启用最大转化竞价策略',
-                },
-              ]}
+          <Space size={6}>
+            <InputNumber
+              style={{ width: 140 }}
+              min={0}
+              addonAfter="元"
+              placeholder="不限"
+              value={form.unitDayBudgetYuan ?? undefined}
+              onChange={(v) => patch({ unitDayBudgetYuan: v })}
+              onBlur={() => pushHistory('plan.unitBudget', form.unitDayBudgetYuan)}
             />
-            {form.budgetMode === 'unified' && (
-              <Space size={12}>
-                <Space size={6}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>计划</Typography.Text>
-                  <InputNumber
-                    style={{ width: 130 }}
-                    min={0}
-                    addonAfter="元"
-                    placeholder="计划日预算"
-                    status={maxConvert && form.campaignDayBudgetYuan == null ? 'error' : undefined}
-                    value={form.campaignDayBudgetYuan ?? undefined}
-                    onChange={(v) => patch({ campaignDayBudgetYuan: v })}
-                    onBlur={() => pushHistory('plan.campaignBudget', form.campaignDayBudgetYuan)}
-                  />
-                  <HistoryDropdown
-                    histKey="plan.campaignBudget"
-                    onPick={(v) => patch({ campaignDayBudgetYuan: Number(v) })}
-                  />
-                </Space>
-                <Space size={6}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>广告组</Typography.Text>
-                  <InputNumber
-                    style={{ width: 130 }}
-                    min={0}
-                    addonAfter="元"
-                    placeholder="组日预算"
-                    value={form.unitDayBudgetYuan ?? undefined}
-                    onChange={(v) => patch({ unitDayBudgetYuan: v })}
-                    onBlur={() => pushHistory('plan.unitBudget', form.unitDayBudgetYuan)}
-                  />
-                  <HistoryDropdown
-                    histKey="plan.unitBudget"
-                    onPick={(v) => patch({ unitDayBudgetYuan: Number(v) })}
-                  />
-                </Space>
-                {maxConvert && form.campaignDayBudgetYuan == null && (
-                  <Typography.Text type="danger" style={{ fontSize: 12 }}>
-                    最大转化必须填写计划日预算
-                  </Typography.Text>
-                )}
-              </Space>
-            )}
+            <HistoryDropdown
+              histKey="plan.unitBudget"
+              onPick={(v) => patch({ unitDayBudgetYuan: Number(v) })}
+            />
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              留空即为不限
+            </Typography.Text>
           </Space>
         </FormRow>
 
@@ -3224,136 +3187,353 @@ export function PlanCardMode(props: {
           </div>
         }
       >
-        <FormRow
-          label="计划类型（测试内容）"
-          tip="默认计划命名的首段，简短几个字说明本批计划测什么，如「三角洲人群包测试」「新素材跑量」。完整默认名：类型-版位-转化目标-app名称-日期时分秒-序号（空段自动跳过）"
-          rowId="fld-campaignName"
-          flash={flashField === 'campaignName'}
-        >
-          <Space size={8} style={{ width: '100%' }}>
-            <Input
-              style={{ width: 280 }}
-              value={form.campaignTypeLabel}
-              onChange={(e) => patch({ campaignTypeLabel: e.target.value })}
-              onBlur={() => pushHistory('plan.campaignTypeLabel', form.campaignTypeLabel)}
-              placeholder="如：三角洲人群包测试"
-              maxLength={40}
-            />
-            <HistoryDropdown
-              histKey="plan.campaignTypeLabel"
-              onPick={(v) => patch({ campaignTypeLabel: v })}
-            />
-          </Space>
-        </FormRow>
-
-        <FormRow
-          label="广告类型"
-          tip="搜索广告：广告主在快手搜索时按关键词触达，支持 2 应用安装 / 5 销售线索 / 7 应用活跃 / 35 电商下单"
-        >
-          <ChipGroup
-            value={form.adType}
-            onChange={(v) => {
-              const next = v as number;
-              if (next === 1) {
-                // 搜索广告只支持 4 个定向维度（地域/OS/过滤已转化/排除人群包），
-                // 其余清零防止残留值直入请求体；版位固定搜索广告。
-                patch({
-                  adType: 1,
-                  sceneMode: 2,
-                  sceneIds: [39],
-                  targeting: {
-                    ...form.targeting,
-                    agesRange: [],
-                    userType: 2,
-                    deviceBrands: [],
-                    devicePrices: [],
-                    intelliExtend: 0,
-                    behaviorType: 0,
-                    disableInstalledApp: 0,
-                    population: [],
-                  },
-                });
-              } else {
-                patch({
-                  adType: 0,
-                  // 从搜索切回信息流时，把搜索版位还原成默认优选
-                  ...(form.sceneIds[0] === 39 ? { sceneMode: 1, sceneIds: [1] } : {}),
-                });
-              }
-            }}
-            options={[
-              { value: 0, label: '展示广告' },
-              { value: 1, label: '搜索广告' },
-            ]}
-          />
-        </FormRow>
-
-        <FormRow label="投放方式">
-          <Space direction="vertical" size={6} style={{ width: '100%' }}>
+        {/* ————— 一、营销目标 / 推广场景 / 广告类型（对齐官网「新建标准推广」第一屏） ————— */}
+        <DrawerGroup title="营销目标" tip="决定链路参数与可用优化目标，置灰项为链路暂未接入">
+          <FormRow label="营销目标" rowId="fld-campaignType" flash={flashField === 'campaignType'}>
             <ChipGroup
-              value={form.putMode}
-              onChange={(v) => {
-                if (v === 'auto') {
-                  // 对齐 mobgi：全自动投放由系统接管预算，统一预算不可用
-                  patch({ putMode: 'auto', budgetMode: 'unlimited' });
-                } else {
-                  patch({ putMode: 'normal' });
-                }
-              }}
-              options={[
-                { value: 'normal', label: '常规投放' },
-                { value: 'auto', label: '全自动投放', tip: 'auto_manage（UAX），白名单功能，需账户已开通' },
-              ]}
+              value={campaignType}
+              onChange={(v) => changeMarketingGoal(v as number)}
+              options={MARKETING_GOAL_OPTIONS}
             />
-            {form.putMode === 'auto' && (
-              <Typography.Text type="warning" style={{ fontSize: 12 }}>
-                平台投放模式升级中，常规投放模式将逐步下线；全自动投放由系统全面接管优化，助力跑量。
-              </Typography.Text>
-            )}
-          </Space>
-        </FormRow>
+          </FormRow>
 
-        {/* 周期稳投（计划级 periodic_delivery_type）：仅 全自动+展示广告；创量实测搜索广告无此区块 */}
-        {form.putMode === 'auto' && form.adType === 0 && (
-          <>
-            <FormRow label="周期稳投" tip="计划级 periodic_delivery_type，白名单特性，开启后真实下发；搜索广告不支持">
+          {isAppGoal && (
+            <FormRow
+              label="推广场景"
+              tip="应用下载 = 拉新安装（提升应用安装）；应用唤起 = 唤回已安装未活跃用户（提升应用活跃）"
+            >
               <ChipGroup
-                value={form.cycleStable ? 'on' : 'off'}
-                onChange={(v) => patch({ cycleStable: v === 'on' })}
+                value={promotionScene}
+                onChange={(v) => changeMarketingGoal(v === 'awaken' ? 7 : 2)}
                 options={[
-                  { value: 'off', label: '关闭' },
-                  { value: 'on', label: '开启', tip: '需账户已开通周期稳投白名单' },
+                  { value: 'download', label: '应用下载', tip: '营销目标 = 提升应用安装' },
+                  {
+                    value: 'awaken',
+                    label: '应用唤起',
+                    tip: '营销目标 = 提升应用活跃；链路沿用「应用 + 应用包」配置，优化目标建议选激活/次留',
+                  },
                 ]}
               />
             </FormRow>
+          )}
 
-            {form.cycleStable && (
-              <>
-                <FormRow label="投放周期" tip="periodic_days：官方默认 7 天，加白后支持 5 天；周期内系统分日稳投">
-                  <ChipGroup
-                    value={form.stableDays}
-                    onChange={(v) => patch({ stableDays: v as number })}
-                    options={[
-                      { value: 7, label: '7天（默认）' },
-                      { value: 5, label: '5天', tip: '需账户加白' },
-                    ]}
-                  />
-                </FormRow>
+          <FormRow
+            label="广告类型"
+            tip="搜索广告：广告主在快手搜索时按关键词触达，支持 2 应用安装 / 5 销售线索 / 7 应用活跃 / 35 电商下单"
+          >
+            <ChipGroup
+              value={form.adType}
+              onChange={(v) => {
+                const next = v as number;
+                if (next === 1) {
+                  // 搜索广告只支持 4 个定向维度（地域/OS/过滤已转化/排除人群包），
+                  // 其余清零防止残留值直入请求体；版位固定搜索广告。
+                  patch({
+                    adType: 1,
+                    sceneMode: 2,
+                    sceneIds: [39],
+                    targeting: {
+                      ...form.targeting,
+                      agesRange: [],
+                      userType: 2,
+                      deviceBrands: [],
+                      devicePrices: [],
+                      intelliExtend: 0,
+                      behaviorType: 0,
+                      disableInstalledApp: 0,
+                      population: [],
+                    },
+                  });
+                } else {
+                  patch({
+                    adType: 0,
+                    // 从搜索切回信息流时，把搜索版位还原成默认优选
+                    ...(form.sceneIds[0] === 39 ? { sceneMode: 1, sceneIds: [1] } : {}),
+                  });
+                }
+              }}
+              options={[
+                { value: 0, label: '展示广告' },
+                { value: 1, label: '搜索广告' },
+              ]}
+            />
+          </FormRow>
+        </DrawerGroup>
 
-                <FormRow label="续投" tip="continue_period_type：周期结束后自动续投下一个周期">
-                  <ChipGroup
-                    value={form.stableRenew ? 'on' : 'off'}
-                    onChange={(v) => patch({ stableRenew: v === 'on' })}
-                    options={[
-                      { value: 'off', label: '关闭' },
-                      { value: 'on', label: '开启' },
-                    ]}
-                  />
-                </FormRow>
-              </>
-            )}
-          </>
-        )}
+        {/* ————— 二、投放模式（全自动 → 自动展开周期稳投面板） ————— */}
+        <DrawerGroup title="投放模式">
+          <FormRow label="投放模式">
+            <Space direction="vertical" size={6} style={{ width: '100%' }}>
+              <ChipGroup
+                value={form.putMode}
+                onChange={(v) => {
+                  if (v === 'auto') {
+                    // 全自动由系统接管出价与预算：统一预算不可用，竞价策略回到成本优先，
+                    // 避免残留「最大转化 + 预算不限」这种自相矛盾的组合
+                    patch({ putMode: 'auto', budgetMode: 'unlimited', bidStrategy: 0 });
+                  } else {
+                    patch({ putMode: 'normal' });
+                  }
+                }}
+                options={[
+                  { value: 'auto', label: '全自动投放', tip: 'auto_manage（UAX），白名单功能，需账户已开通' },
+                  { value: 'normal', label: '常规投放' },
+                ]}
+              />
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {form.putMode === 'auto'
+                  ? '系统全面接管出价与预算优化，可搭配「周期稳投」锁定成本；常规投放模式平台将逐步下线。'
+                  : '手动设定出价、预算与排期，完全由自己控制。'}
+              </Typography.Text>
+            </Space>
+          </FormRow>
+
+          {form.putMode === 'auto' && (
+            <div
+              style={{
+                border: '1px solid #E8E6E1',
+                background: '#FBFAF7',
+                borderRadius: 8,
+                padding: '12px 14px 4px',
+                marginBottom: 16,
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  marginBottom: form.cycleStable && form.adType === 0 ? 10 : 2,
+                }}
+              >
+                <Switch
+                  size="small"
+                  checked={form.cycleStable}
+                  disabled={form.adType === 1}
+                  onChange={(on) => patch({ cycleStable: on })}
+                />
+                <span style={{ fontSize: 13, fontWeight: 600 }}>周期稳投</span>
+                <Tag color="orange" style={{ marginInlineEnd: 0 }}>
+                  白名单
+                </Tag>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {form.adType === 1
+                    ? '搜索广告不支持周期稳投'
+                    : '按周期分日稳投，压低成本、稳定跑量'}
+                </Typography.Text>
+              </div>
+
+              {form.adType === 0 && form.cycleStable && (
+                <>
+                  <FormRow
+                    label="投放周期"
+                    tip="预设天数下发 periodic_days；自定义区间按起止日期折算天数，并作为计划实际投放起止"
+                  >
+                    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                      <ChipGroup
+                        value={form.stablePeriodMode === 'custom' ? 'custom' : String(form.stableDays)}
+                        onChange={(v) => {
+                          if (v === 'custom') {
+                            patch({
+                              stablePeriodMode: 'custom',
+                              stableCustomBegin: form.stableCustomBegin || form.beginTime || today(),
+                            });
+                          } else {
+                            patch({ stablePeriodMode: 'preset', stableDays: Number(v) });
+                          }
+                        }}
+                        options={[
+                          { value: '2', label: '2 天' },
+                          { value: '3', label: '3 天' },
+                          { value: '4', label: '4 天' },
+                          { value: '5', label: '5 天' },
+                          { value: '6', label: '6 天' },
+                          { value: '7', label: '7 天（推荐）' },
+                          { value: 'custom', label: '自定义日期', tip: '自己指定起止日期' },
+                        ]}
+                      />
+                      {form.stablePeriodMode === 'custom' && (
+                        <Space size={8} wrap>
+                          <DatePicker.RangePicker
+                            style={{ width: 260 }}
+                            value={
+                              form.stableCustomBegin && form.stableCustomEnd
+                                ? [dayjs(form.stableCustomBegin), dayjs(form.stableCustomEnd)]
+                                : null
+                            }
+                            onChange={(range) =>
+                              patch({
+                                stableCustomBegin: range?.[0]?.format('YYYY-MM-DD') ?? '',
+                                stableCustomEnd: range?.[1]?.format('YYYY-MM-DD') ?? '',
+                              })
+                            }
+                            disabledDate={(cur) => cur.isBefore(dayjs().startOf('day'))}
+                          />
+                          <Typography.Text
+                            type={stableCustomDays != null && stableCustomDays > 0 ? 'secondary' : 'danger'}
+                            style={{ fontSize: 12 }}
+                          >
+                            {stableCustomDays != null && stableCustomDays > 0
+                              ? stableCustomDays <= 7
+                                ? `共 ${stableCustomDays} 天（periodic_days=${stableCustomDays}）`
+                                : `共 ${stableCustomDays} 天（>7 天，仅按起止日期投放，不下发 periodic_days）`
+                              : '请选择完整的起止日期，否则回退为预设天数'}
+                          </Typography.Text>
+                        </Space>
+                      )}
+                    </Space>
+                  </FormRow>
+
+                  <FormRow
+                    label="周期总预算"
+                    tip="range_budget：系统在稳投周期内的总消耗上限（官方一般要求 ≥3500 元，部分账户 500 元起）；留空则按计划日预算走"
+                  >
+                    <InputNumber
+                      style={{ width: 160 }}
+                      min={0}
+                      step={100}
+                      addonAfter="元"
+                      placeholder="周期总预算"
+                      value={form.cycleBudgetYuan ?? undefined}
+                      onChange={(v) => patch({ cycleBudgetYuan: v })}
+                    />
+                  </FormRow>
+
+                  <FormRow label="到期续投" tip="continue_period_type：周期结束后自动续投下一个周期">
+                    <ChipGroup
+                      value={form.stableRenew ? 'on' : 'off'}
+                      onChange={(v) => patch({ stableRenew: v === 'on' })}
+                      options={[
+                        { value: 'off', label: '不续投' },
+                        { value: 'on', label: '自动续投' },
+                      ]}
+                    />
+                  </FormRow>
+                </>
+              )}
+            </div>
+          )}
+        </DrawerGroup>
+
+        {/* ————— 三、计划设置（竞价策略 / 计划日预算 / 计划命名） ————— */}
+        <DrawerGroup title="计划设置">
+          <FormRow label="竞价策略">
+            <Space direction="vertical" size={8} style={{ width: '100%' }}>
+              <ChipGroup
+                value={form.bidStrategy}
+                onChange={(v) => patch({ bidStrategy: v as 0 | 1 })}
+                options={[
+                  { value: 0, label: '成本优先', tip: '按目标出价控制成本，平稳放量' },
+                  {
+                    value: 1,
+                    label: '最大转化',
+                    disabled: maxConvertBlocked,
+                    tip: maxConvertBlocked
+                      ? '当计划预算为不限时，不支持选择最大转化，请先将预算改为「统一预算」'
+                      : '平台智能出价，无需填写出价',
+                  },
+                ]}
+              />
+              {maxConvert && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="最大转化为平台智能出价：出价留空由系统托管，需先填写计划日预算。"
+                />
+              )}
+            </Space>
+          </FormRow>
+
+          {form.putMode === 'auto' ? (
+            <FormRow label="计划日预算">
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                全自动投放由系统接管预算（日预算不生效）；需要封顶成本请在「周期稳投」里填周期总预算。
+              </Typography.Text>
+            </FormRow>
+          ) : (
+            <FormRow
+              label="计划日预算"
+              rowId="fld-campaignDayBudgetYuan"
+              flash={flashField === 'campaignDayBudgetYuan'}
+            >
+              <Space size={12} wrap>
+                <ChipGroup
+                  value={form.budgetMode}
+                  onChange={(v) => patch({ budgetMode: v as 'unlimited' | 'unified' })}
+                  options={[
+                    { value: 'unlimited', label: '不限' },
+                    {
+                      value: 'unified',
+                      label: '统一预算',
+                      tip: maxConvert ? '最大转化必须填计划日预算' : '每条计划用同一日预算',
+                    },
+                  ]}
+                />
+                {form.budgetMode === 'unified' && (
+                  <Space size={6}>
+                    <InputNumber
+                      style={{ width: 140 }}
+                      min={0}
+                      addonAfter="元"
+                      placeholder="计划日预算"
+                      status={maxConvert && form.campaignDayBudgetYuan == null ? 'error' : undefined}
+                      value={form.campaignDayBudgetYuan ?? undefined}
+                      onChange={(v) => patch({ campaignDayBudgetYuan: v })}
+                      onBlur={() => pushHistory('plan.campaignBudget', form.campaignDayBudgetYuan)}
+                    />
+                    <HistoryDropdown
+                      histKey="plan.campaignBudget"
+                      onPick={(v) => patch({ campaignDayBudgetYuan: Number(v) })}
+                    />
+                  </Space>
+                )}
+                {maxConvert && form.campaignDayBudgetYuan == null && (
+                  <Typography.Text type="danger" style={{ fontSize: 12 }}>
+                    最大转化必须填写计划日预算
+                  </Typography.Text>
+                )}
+              </Space>
+            </FormRow>
+          )}
+
+          <FormRow
+            label="计划命名"
+            tip="计划类型是默认命名的首段（简短说明本批测什么）。完整默认名：类型-版位-转化目标-app名称-日期时分秒-序号，空段自动跳过"
+            rowId="fld-campaignName"
+            flash={flashField === 'campaignName'}
+          >
+            <Space direction="vertical" size={6} style={{ width: '100%' }}>
+              <Space size={8} style={{ width: '100%' }}>
+                <span style={{ fontSize: 12, color: '#888780' }}>计划类型</span>
+                <Input
+                  style={{ width: 260 }}
+                  value={form.campaignTypeLabel}
+                  onChange={(e) => patch({ campaignTypeLabel: e.target.value })}
+                  onBlur={() => pushHistory('plan.campaignTypeLabel', form.campaignTypeLabel)}
+                  placeholder="如：三角洲人群包测试"
+                  maxLength={40}
+                />
+                <HistoryDropdown
+                  histKey="plan.campaignTypeLabel"
+                  onPick={(v) => patch({ campaignTypeLabel: v })}
+                />
+              </Space>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                实际计划名示例：
+                <code>
+                  {[
+                    form.campaignTypeLabel.trim() || '类型',
+                    form.adType === 1 ? '搜索' : form.sceneMode === 1 ? '智能优选' : '版位',
+                    ocpxLabel || '转化目标',
+                    '应用名',
+                    '20261123151200',
+                    '01',
+                  ].join('-')}
+                </code>
+              </Typography.Text>
+            </Space>
+          </FormRow>
+        </DrawerGroup>
       </Drawer>
 
       {/* ================= 编辑抽屉：定向 ================= */}
@@ -4651,6 +4831,44 @@ function SectionCard(props: {
 }
 
 /** mobgi 式摘要卡：两列「键：值」小字 + 右上角编辑按钮 */
+/** 抽屉内的分组小标题（营销目标 / 投放模式 / 计划设置…），带橙色竖条 */
+function DrawerGroup(props: { title: string; tip?: string; children: React.ReactNode }) {
+  const { title, tip, children } = props;
+  return (
+    <div style={{ marginBottom: 4 }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          paddingBottom: 8,
+          marginBottom: 10,
+          borderBottom: '1px solid #F0EEE9',
+        }}
+      >
+        <span
+          style={{
+            width: 3,
+            height: 13,
+            borderRadius: 2,
+            background: BRAND,
+            display: 'inline-block',
+          }}
+        />
+        <span style={{ fontSize: 13.5, fontWeight: 600, color: '#37352F' }}>{title}</span>
+        {tip && (
+          <Tooltip title={tip}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              ⓘ
+            </Typography.Text>
+          </Tooltip>
+        )}
+      </div>
+      {children}
+    </div>
+  );
+}
+
 function SummaryCard(props: {
   title: string;
   onEdit: () => void;
@@ -4660,7 +4878,7 @@ function SummaryCard(props: {
   return (
     <Card
       size="small"
-      style={{ borderRadius: 10, marginBottom: 12 }}
+      style={{ borderRadius: 10, marginBottom: 12, breakInside: 'avoid' }}
       title={
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span
