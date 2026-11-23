@@ -356,7 +356,16 @@ function splitAcross<T>(items: T[], k: number): T[][] {
  * - null：素材类问题（创意组卡片本身就是问题点，只滚动高亮卡片）；
  * - 未登记的字段：只滚动高亮创意组卡片（保守兜底）。
  */
-const FIELD_DRAWER: Record<string, 'group' | 'target' | 'creative' | 'conversion' | null> = {
+const FIELD_DRAWER: Record<string, 'campaign' | 'group' | 'target' | 'creative' | 'conversion' | null> = {
+  // 广告计划基本信息（计划层：类型/广告类型/投放方式/周期稳投）
+  campaignName: 'campaign',
+  adType: 'campaign',
+  putMode: 'campaign',
+  campaignType: 'campaign',
+  // 广告组基本信息（竞价/预算/排期/版位/命名）
+  campaignDayBudgetYuan: 'group',
+  unitName: 'group',
+  creativeName: 'creative', // 创意名由「广告创意命名规则」配置，配置在创意基本信息抽屉
   // 转化路径（应用/落地页）
   appId: 'conversion',
   packageId: 'conversion',
@@ -372,11 +381,6 @@ const FIELD_DRAWER: Record<string, 'group' | 'target' | 'creative' | 'conversion
   jingleBellId: 'conversion',
   liveUserId: 'conversion',
   // 广告组基本信息（竞价/预算/排期/版位/命名）
-  campaignName: 'group',
-  campaignType: 'group',
-  campaignDayBudgetYuan: 'group',
-  unitName: 'group',
-  creativeName: 'group', // 创意名由「广告创意命名规则」模板生成，模板在广告组抽屉
   bidType: 'group',
   bidYuan: 'group',
   cpaBidYuan: 'group',
@@ -557,8 +561,8 @@ export function PlanCardMode(props: {
   const [tagInput, setTagInput] = useState('');
 
   /* ---------------- 编辑抽屉 ---------------- */
-  const [drawer, setDrawer] = useState<null | 'group' | 'target' | 'creative' | 'conversion'>(null);
-  const openDrawer = (d: 'group' | 'target' | 'creative' | 'conversion') => setDrawer(d);
+  const [drawer, setDrawer] = useState<null | 'campaign' | 'group' | 'target' | 'creative' | 'conversion'>(null);
+  const openDrawer = (d: 'campaign' | 'group' | 'target' | 'creative' | 'conversion') => setDrawer(d);
   const closeDrawer = () => setDrawer(null);
 
   /* ---------------- 错误定位（提交报错弹窗 → 跳到对应创意组卡片/表单项） ---------------- */
@@ -1697,8 +1701,12 @@ export function PlanCardMode(props: {
           alignItems: 'start',
         }}
       >
-      {/* ——— 摘要卡：广告组基本信息 ——— */}
-      <SummaryCard title="广告组基本信息" onEdit={() => openDrawer('group')}>
+      {/* ——— 摘要卡：广告计划基本信息（计划层：命名/类型/投放方式/周期稳投） ——— */}
+      <SummaryCard title="广告计划基本信息" onEdit={() => openDrawer('campaign')}>
+        <SumItem
+          k="计划类型"
+          v={form.campaignTypeLabel.trim() || '未填（默认名不含类型段）'}
+        />
         <SumItem
           k="广告类型"
           v={
@@ -1709,6 +1717,33 @@ export function PlanCardMode(props: {
               : '搜索广告'
           }
         />
+        <SumItem k="投放方式" v={form.putMode === 'normal' ? '常规投放' : '全自动投放'} />
+        {form.putMode === 'auto' && form.adType === 0 && (
+          <SumItem
+            k="周期稳投"
+            v={
+              form.cycleStable
+                ? `开启（${form.stableDays}天${form.stableRenew ? '·续投' : ''}${form.cycleBudgetYuan != null ? `·总预算${form.cycleBudgetYuan}元` : ''}）`
+                : '关闭'
+            }
+          />
+        )}
+        <SumItem
+          k="计划命名"
+          v={
+            [
+              form.campaignTypeLabel.trim() || null,
+              form.adType === 1 ? '搜索' : form.sceneMode === 1 ? '智能优选' : null,
+              '…-日期时分秒-序号',
+            ]
+              .filter(Boolean)
+              .join('-')
+          }
+        />
+      </SummaryCard>
+
+      {/* ——— 摘要卡：广告组基本信息 ——— */}
+      <SummaryCard title="广告组基本信息" onEdit={() => openDrawer('group')}>
         {isSearchAd && (
           <SumItem
             k="搜索设置"
@@ -1728,7 +1763,6 @@ export function PlanCardMode(props: {
               .join(' · ')}
           />
         )}
-        <SumItem k="投放方式" v={form.putMode === 'normal' ? '常规投放' : '全自动投放'} />
         <SumItem k="投放位置" v={sceneText} />
         <SumItem k="竞价策略" v={bidTypeLabel} />
         <SumItem k="优化目标" v={ocpxLabel ?? (maxConvert ? '转化数（平台智能）' : '未选择')} />
@@ -1749,16 +1783,6 @@ export function PlanCardMode(props: {
           k="创意展现"
           v={form.showMode === 2 ? '智能优选' : '随机轮播'}
         />
-        {form.putMode === 'auto' && form.adType === 0 && (
-          <SumItem
-            k="周期稳投"
-            v={
-              form.cycleStable
-                ? `开启（${form.stableDays}天${form.stableRenew ? '·续投' : ''}${form.cycleBudgetYuan != null ? `·总预算${form.cycleBudgetYuan}元` : ''}）`
-                : '关闭'
-            }
-          />
-        )}
         <SumItem
           k="出价分配"
           v={form.bidAssign === 'same' ? '全部相同' : '按账户分配'}
@@ -1835,6 +1859,16 @@ export function PlanCardMode(props: {
 
       {/* ——— 摘要卡：创意基本信息 ——— */}
       <SummaryCard title="创意基本信息" onEdit={() => openDrawer('creative')}>
+        <SumItem
+          k="创意命名"
+          v={
+            form.creativeNameSameAsMaterial
+              ? '与素材名一致'
+              : form.creativeNameTpl
+                ? '自定义模板'
+                : '默认：日期_素材名_序号'
+          }
+        />
         <SumItem k="行动号召" v={form.actionBarText} />
         {form.adType === 0 && (
           <SumItem k="搜索快投" v={form.searchQuick ? '开启（搜索流量）' : '关闭'} />
@@ -2371,48 +2405,6 @@ export function PlanCardMode(props: {
           </div>
         }
       >
-        <FormRow
-          label="广告类型"
-          tip="搜索广告：广告主在快手搜索时按关键词触达，支持 2 应用安装 / 5 销售线索 / 7 应用活跃 / 35 电商下单"
-        >
-          <ChipGroup
-            value={form.adType}
-            onChange={(v) => {
-              const next = v as number;
-              if (next === 1) {
-                // 搜索广告只支持 4 个定向维度（地域/OS/过滤已转化/排除人群包），
-                // 其余清零防止残留值直入请求体；版位固定搜索广告。
-                patch({
-                  adType: 1,
-                  sceneMode: 2,
-                  sceneIds: [39],
-                  targeting: {
-                    ...form.targeting,
-                    agesRange: [],
-                    userType: 2,
-                    deviceBrands: [],
-                    devicePrices: [],
-                    intelliExtend: 0,
-                    behaviorType: 0,
-                    disableInstalledApp: 0,
-                    population: [],
-                  },
-                });
-              } else {
-                patch({
-                  adType: 0,
-                  // 从搜索切回信息流时，把搜索版位还原成默认优选
-                  ...(form.sceneIds[0] === 39 ? { sceneMode: 1, sceneIds: [1] } : {}),
-                });
-              }
-            }}
-            options={[
-              { value: 0, label: '展示广告' },
-              { value: 1, label: '搜索广告' },
-            ]}
-          />
-        </FormRow>
-
         <FormRow label="投放方式">
           <Space direction="vertical" size={6} style={{ width: '100%' }}>
             <ChipGroup
@@ -2439,55 +2431,12 @@ export function PlanCardMode(props: {
         </FormRow>
 
         {form.putMode === 'auto' && (
-          <>
-            {/* 周期稳投仅展示广告有：创量实测搜索广告（含全自动投放态）无此区块 */}
-            {form.adType === 0 && (
-              <>
-                <FormRow label="周期稳投" tip="计划级 periodic_delivery_type，白名单特性，开启后真实下发；搜索广告不支持">
-                  <ChipGroup
-                    value={form.cycleStable ? 'on' : 'off'}
-                    onChange={(v) => patch({ cycleStable: v === 'on' })}
-                    options={[
-                      { value: 'off', label: '关闭' },
-                      { value: 'on', label: '开启', tip: '需账户已开通周期稳投白名单' },
-                    ]}
-                  />
-                </FormRow>
-
-                {form.cycleStable && (
-                  <>
-                    <FormRow label="投放周期" tip="periodic_days：官方默认 7 天，加白后支持 5 天；周期内系统分日稳投">
-                      <ChipGroup
-                        value={form.stableDays}
-                        onChange={(v) => patch({ stableDays: v as number })}
-                        options={[
-                          { value: 7, label: '7天（默认）' },
-                          { value: 5, label: '5天', tip: '需账户加白' },
-                        ]}
-                      />
-                    </FormRow>
-
-                    <FormRow label="续投" tip="continue_period_type：周期结束后自动续投下一个周期">
-                      <ChipGroup
-                        value={form.stableRenew ? 'on' : 'off'}
-                        onChange={(v) => patch({ stableRenew: v === 'on' })}
-                        options={[
-                          { value: 'off', label: '关闭' },
-                          { value: 'on', label: '开启' },
-                        ]}
-                      />
-                    </FormRow>
-                  </>
-                )}
-              </>
-            )}
-
-            <FormRow
-              label="广告组命名规则"
-              tip="通配符：[序号] [日期] [时间] [账户ID] [账户备注] [应用名称]"
-              rowId="fld-unitName"
-              flash={flashField === 'unitName' || flashField === 'campaignName'}
-            >
+          <FormRow
+            label="广告组命名规则"
+            tip="通配符：[序号] [日期] [时间] [账户ID] [账户备注] [应用名称]"
+            rowId="fld-unitName"
+            flash={flashField === 'unitName'}
+          >
               <Space direction="vertical" size={4} style={{ width: '100%' }}>
                 <Space size={6} style={{ width: '100%' }}>
                   <Input
@@ -2516,48 +2465,7 @@ export function PlanCardMode(props: {
                 </Space>
               </Space>
             </FormRow>
-          </>
         )}
-
-        {/* 创意命名：常规/全自动都展示（创意名独立于组名，可自定义） */}
-        <FormRow
-          label="广告创意命名规则"
-          tip="通配符：[序号] [日期] [时间]；勾选「与素材名一致」时忽略模板，直接用视频名"
-          rowId="fld-creativeName"
-          flash={flashField === 'creativeName'}
-        >
-          <Space direction="vertical" size={4} style={{ width: '100%' }}>
-            <ChipGroup
-              value={form.creativeNameSameAsMaterial ? 'material' : 'tpl'}
-              onChange={(v) => patch({ creativeNameSameAsMaterial: v === 'material' })}
-              options={[
-                { value: 'tpl', label: '命名模板' },
-                { value: 'material', label: '与素材名一致', tip: '每个创意直接使用其视频文件名，组内重名自动加 -2/-3 序号' },
-              ]}
-            />
-            {form.creativeNameSameAsMaterial ? (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                创意名将直接使用所选视频的名称，例如「产品A讲解视频」
-              </Typography.Text>
-            ) : (
-              <>
-                <Space size={6} style={{ width: '100%' }}>
-                  <Input
-                    style={{ width: 380 }}
-                    value={form.creativeNameTpl}
-                    onChange={(e) => patch({ creativeNameTpl: e.target.value })}
-                    onBlur={() => pushHistory('plan.creativeNameTpl', form.creativeNameTpl)}
-                    placeholder="留空=默认规则（日期_素材名_序号）；或自定义模板"
-                    maxLength={100}
-                    suffix={<Typography.Text type="secondary" style={{ fontSize: 12 }}>{`${form.creativeNameTpl.length}/100`}</Typography.Text>}
-                  />
-                  <HistoryDropdown histKey="plan.creativeNameTpl" onPick={(v) => patch({ creativeNameTpl: v })} />
-                </Space>
-                <NameTplChips tpl={form.creativeNameTpl} onChange={(t) => patch({ creativeNameTpl: t })} />
-              </>
-            )}
-          </Space>
-        </FormRow>
 
         {form.adType === 0 ? (
         <FormRow
@@ -3190,26 +3098,6 @@ export function PlanCardMode(props: {
           </Space>
         </FormRow>
 
-        <FormRow
-          label="计划类型（测试内容）"
-          tip="默认计划命名的首段，简短几个字说明本批计划测什么，如「三角洲人群包测试」「新素材跑量」。完整默认名：类型-版位-转化目标-app名称-日期时分秒-序号（空段自动跳过）"
-        >
-          <Space size={8} style={{ width: '100%' }}>
-            <Input
-              style={{ width: 280 }}
-              value={form.campaignTypeLabel}
-              onChange={(e) => patch({ campaignTypeLabel: e.target.value })}
-              onBlur={() => pushHistory('plan.campaignTypeLabel', form.campaignTypeLabel)}
-              placeholder="如：三角洲人群包测试"
-              maxLength={40}
-            />
-            <HistoryDropdown
-              histKey="plan.campaignTypeLabel"
-              onPick={(v) => patch({ campaignTypeLabel: v })}
-            />
-          </Space>
-        </FormRow>
-
         {form.putMode === 'normal' && (
           <FormRow label="广告组名称配置" tip="留空前缀 = 默认规则（组名=日期时分秒_序号）；填前缀则用 前缀_序号">
             <Space direction="vertical" size={8} style={{ width: '100%' }}>
@@ -3318,6 +3206,153 @@ export function PlanCardMode(props: {
               </Typography.Text>
             </Space>
           </FormRow>
+        )}
+      </Drawer>
+
+      {/* ================= 编辑抽屉：广告计划基本信息 ================= */}
+      <Drawer
+        title="广告计划基本信息"
+        placement="right"
+        width={520}
+        open={drawer === 'campaign'}
+        onClose={closeDrawer}
+        footer={
+          <div style={{ textAlign: 'right' }}>
+            <Button type="primary" onClick={closeDrawer}>
+              完成
+            </Button>
+          </div>
+        }
+      >
+        <FormRow
+          label="计划类型（测试内容）"
+          tip="默认计划命名的首段，简短几个字说明本批计划测什么，如「三角洲人群包测试」「新素材跑量」。完整默认名：类型-版位-转化目标-app名称-日期时分秒-序号（空段自动跳过）"
+          rowId="fld-campaignName"
+          flash={flashField === 'campaignName'}
+        >
+          <Space size={8} style={{ width: '100%' }}>
+            <Input
+              style={{ width: 280 }}
+              value={form.campaignTypeLabel}
+              onChange={(e) => patch({ campaignTypeLabel: e.target.value })}
+              onBlur={() => pushHistory('plan.campaignTypeLabel', form.campaignTypeLabel)}
+              placeholder="如：三角洲人群包测试"
+              maxLength={40}
+            />
+            <HistoryDropdown
+              histKey="plan.campaignTypeLabel"
+              onPick={(v) => patch({ campaignTypeLabel: v })}
+            />
+          </Space>
+        </FormRow>
+
+        <FormRow
+          label="广告类型"
+          tip="搜索广告：广告主在快手搜索时按关键词触达，支持 2 应用安装 / 5 销售线索 / 7 应用活跃 / 35 电商下单"
+        >
+          <ChipGroup
+            value={form.adType}
+            onChange={(v) => {
+              const next = v as number;
+              if (next === 1) {
+                // 搜索广告只支持 4 个定向维度（地域/OS/过滤已转化/排除人群包），
+                // 其余清零防止残留值直入请求体；版位固定搜索广告。
+                patch({
+                  adType: 1,
+                  sceneMode: 2,
+                  sceneIds: [39],
+                  targeting: {
+                    ...form.targeting,
+                    agesRange: [],
+                    userType: 2,
+                    deviceBrands: [],
+                    devicePrices: [],
+                    intelliExtend: 0,
+                    behaviorType: 0,
+                    disableInstalledApp: 0,
+                    population: [],
+                  },
+                });
+              } else {
+                patch({
+                  adType: 0,
+                  // 从搜索切回信息流时，把搜索版位还原成默认优选
+                  ...(form.sceneIds[0] === 39 ? { sceneMode: 1, sceneIds: [1] } : {}),
+                });
+              }
+            }}
+            options={[
+              { value: 0, label: '展示广告' },
+              { value: 1, label: '搜索广告' },
+            ]}
+          />
+        </FormRow>
+
+        <FormRow label="投放方式">
+          <Space direction="vertical" size={6} style={{ width: '100%' }}>
+            <ChipGroup
+              value={form.putMode}
+              onChange={(v) => {
+                if (v === 'auto') {
+                  // 对齐 mobgi：全自动投放由系统接管预算，统一预算不可用
+                  patch({ putMode: 'auto', budgetMode: 'unlimited' });
+                } else {
+                  patch({ putMode: 'normal' });
+                }
+              }}
+              options={[
+                { value: 'normal', label: '常规投放' },
+                { value: 'auto', label: '全自动投放', tip: 'auto_manage（UAX），白名单功能，需账户已开通' },
+              ]}
+            />
+            {form.putMode === 'auto' && (
+              <Typography.Text type="warning" style={{ fontSize: 12 }}>
+                平台投放模式升级中，常规投放模式将逐步下线；全自动投放由系统全面接管优化，助力跑量。
+              </Typography.Text>
+            )}
+          </Space>
+        </FormRow>
+
+        {/* 周期稳投（计划级 periodic_delivery_type）：仅 全自动+展示广告；创量实测搜索广告无此区块 */}
+        {form.putMode === 'auto' && form.adType === 0 && (
+          <>
+            <FormRow label="周期稳投" tip="计划级 periodic_delivery_type，白名单特性，开启后真实下发；搜索广告不支持">
+              <ChipGroup
+                value={form.cycleStable ? 'on' : 'off'}
+                onChange={(v) => patch({ cycleStable: v === 'on' })}
+                options={[
+                  { value: 'off', label: '关闭' },
+                  { value: 'on', label: '开启', tip: '需账户已开通周期稳投白名单' },
+                ]}
+              />
+            </FormRow>
+
+            {form.cycleStable && (
+              <>
+                <FormRow label="投放周期" tip="periodic_days：官方默认 7 天，加白后支持 5 天；周期内系统分日稳投">
+                  <ChipGroup
+                    value={form.stableDays}
+                    onChange={(v) => patch({ stableDays: v as number })}
+                    options={[
+                      { value: 7, label: '7天（默认）' },
+                      { value: 5, label: '5天', tip: '需账户加白' },
+                    ]}
+                  />
+                </FormRow>
+
+                <FormRow label="续投" tip="continue_period_type：周期结束后自动续投下一个周期">
+                  <ChipGroup
+                    value={form.stableRenew ? 'on' : 'off'}
+                    onChange={(v) => patch({ stableRenew: v === 'on' })}
+                    options={[
+                      { value: 'off', label: '关闭' },
+                      { value: 'on', label: '开启' },
+                    ]}
+                  />
+                </FormRow>
+              </>
+            )}
+          </>
         )}
       </Drawer>
 
@@ -3694,6 +3729,45 @@ export function PlanCardMode(props: {
           </div>
         }
       >
+        <FormRow
+          label="广告创意命名规则"
+          tip="通配符：[序号] [日期] [时间]；勾选「与素材名一致」时忽略模板，直接用视频名"
+          rowId="fld-creativeName"
+          flash={flashField === 'creativeName'}
+        >
+          <Space direction="vertical" size={4} style={{ width: '100%' }}>
+            <ChipGroup
+              value={form.creativeNameSameAsMaterial ? 'material' : 'tpl'}
+              onChange={(v) => patch({ creativeNameSameAsMaterial: v === 'material' })}
+              options={[
+                { value: 'tpl', label: '命名模板' },
+                { value: 'material', label: '与素材名一致', tip: '每个创意直接使用其视频文件名，组内重名自动加 -2/-3 序号' },
+              ]}
+            />
+            {form.creativeNameSameAsMaterial ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                创意名将直接使用所选视频的名称，例如「产品A讲解视频」
+              </Typography.Text>
+            ) : (
+              <>
+                <Space size={6} style={{ width: '100%' }}>
+                  <Input
+                    style={{ width: 380 }}
+                    value={form.creativeNameTpl}
+                    onChange={(e) => patch({ creativeNameTpl: e.target.value })}
+                    onBlur={() => pushHistory('plan.creativeNameTpl', form.creativeNameTpl)}
+                    placeholder="留空=默认规则（日期_素材名_序号）；或自定义模板"
+                    maxLength={100}
+                    suffix={<Typography.Text type="secondary" style={{ fontSize: 12 }}>{`${form.creativeNameTpl.length}/100`}</Typography.Text>}
+                  />
+                  <HistoryDropdown histKey="plan.creativeNameTpl" onPick={(v) => patch({ creativeNameTpl: v })} />
+                </Space>
+                <NameTplChips tpl={form.creativeNameTpl} onChange={(t) => patch({ creativeNameTpl: t })} />
+              </>
+            )}
+          </Space>
+        </FormRow>
+
         {/* —— 搜索快投（仅展示广告；对齐创量：需白名单，选智能优选/上下滑大屏版位后开启搜索投放） —— */}
         {form.adType === 0 && (
           <FormRow
