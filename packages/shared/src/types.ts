@@ -331,6 +331,11 @@ export interface PlanRow {
   creativeName: string;
   /** 创意名直接使用素材（视频）名，忽略命名模板；组内重名自动加 -2/-3 序号 */
   creativeNameSameAsMaterial?: boolean | null;
+  /**
+   * 创意命名走默认规则「日期_素材名_序号」：creativeNameTpl 留空时由前端置 'material'，
+   * 服务端逐视频命名（task.service）；填了自定义模板则为 null，走模板 + 组内 -创XX 后缀。
+   */
+  creativeNaming?: 'material' | null;
   /** 素材类型 */
   materialType: number;
   /** 视频 ID（photo_id） */

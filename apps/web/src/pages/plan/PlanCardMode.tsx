@@ -192,6 +192,8 @@ export interface CardForm {
   bidAssign: 'same' | 'perAccount';
   /** 按账户分配：账户 ID → 固定出价（元） */
   accountBids: Record<string, number | null>;
+  /** 计划类型（测试内容说明）：如「三角洲人群包测试」，默认计划命名的首段，简短几字说明本批计划测什么 */
+  campaignTypeLabel: string;
   /** 广告组名称配置：unified 统一配置 / perAccount 分账户配置 */
   nameMode: 'unified' | 'perAccount';
   /** 分账户配置：账户 ID → 命名前缀 */
@@ -415,15 +417,15 @@ export function PlanCardMode(props: {
 
   const [form, setForm] = useState<CardForm>(() => ({
     advertiserId: accounts[0]?.advertiserId ?? '',
-    namePrefix: defaultPrefix(),
+    namePrefix: '',
     adType: 0,
     putMode: 'normal',
     cycleStable: false,
     stableDays: 7,
     stableRenew: false,
-    unitNameTpl: `${defaultPrefix()}-[日期]-[序号]`,
+    unitNameTpl: '',
     creativeNameSameAsMaterial: false,
-    creativeNameTpl: `${defaultPrefix()}-[日期]-创意[序号]`,
+    creativeNameTpl: '',
     cycleBudgetYuan: null,
     bidAssign: 'same',
     accountBids: {},
@@ -471,6 +473,7 @@ export function PlanCardMode(props: {
     searchExplore: false,
     searchKeywordsText: '',
     searchMatchType: 3,
+    campaignTypeLabel: '',
     searchNegPhraseText: '',
     searchNegExactText: '',
     nativeAd: false,
@@ -1213,9 +1216,12 @@ export function PlanCardMode(props: {
         : b,
     );
 
-    // 命名规则：全自动投放用独立模板（通配符 [序号]/[日期]/[时间]/[账户ID]/[账户备注]/[应用名称]），
-    // 常规投放沿用「前缀_序号」。空模板回落到前缀。
-    // 分账户命名配置时各账户用各自前缀；序号每账户独立从起始值计。
+    // —— 命名规则（2026-11-23 用户拍板的新默认）——
+    // 计划：类型-版位-转化目标-app名称-日期时分秒-序号
+    //   类型 = 「计划类型」输入框（测试内容，如「三角洲人群包测试」），空段自动跳过
+    // 广告组：日期时分秒_序号
+    // 广告创意：日期_素材名_序号（服务端逐视频命名，见 task.service）
+    // 用户显式填了前缀（常规）/ 组命名模板（全自动）/ 创意模板时，仍走自定义模板。
     const namePrefixForAccount =
       form.nameMode === 'perAccount'
         ? (form.accountNamePrefixes[advertiserId] ?? form.namePrefix)
@@ -1232,10 +1238,31 @@ export function PlanCardMode(props: {
           ((account as (typeof account & { appName?: string }) | undefined)?.appName ?? ''),
         )
         .slice(0, 100);
-    const unitTpl = form.putMode === 'auto' ? form.unitNameTpl : `${namePrefixForAccount}_[序号]`;
-    // 创意名独立于组名：两种投放模式都用创意命名模板（可自定义），不再沿用组名；
-    // 勾选「创意名与素材名一致」时服务端直接取视频名。
+    const nowD = new Date();
+    const p2 = (n: number) => String(n).padStart(2, '0');
+    const date8 = `${nowD.getFullYear()}${p2(nowD.getMonth() + 1)}${p2(nowD.getDate())}`;
+    const ts14 = `${date8}${p2(nowD.getHours())}${p2(nowD.getMinutes())}${p2(nowD.getSeconds())}`;
+    const sceneLabel =
+      form.adType === 1
+        ? '搜索'
+        : form.sceneMode === 1
+          ? '智能优选'
+          : form.sceneIds.map((k) => SCENE_ID_META[k]?.label ?? k).join('、');
+    const goalLabel = form.ocpxActionType
+      ? (OCPX_ACTION_TYPE_META[form.ocpxActionType]?.label ?? '')
+      : '';
+    const appName =
+      ((account as (typeof account & { appName?: string }) | undefined)?.appName ?? '');
+    const campBase = [form.campaignTypeLabel.trim(), sceneLabel, goalLabel, appName, ts14]
+      .filter(Boolean)
+      .join('-');
+    /** 是否走了自定义命名（常规=填了前缀；全自动=填了组模板） */
+    const useCustomNaming =
+      form.putMode === 'auto' ? Boolean(form.unitNameTpl.trim()) : Boolean(namePrefixForAccount.trim());
+    // 创意名独立于组名：两种投放模式都用创意命名模板（可自定义）；
+    // 模板留空 → 服务端按默认规则「日期_素材名_序号」逐视频命名（勾选与素材一致时除外）。
     const creativeTpl = form.creativeNameTpl;
+    const creativeNaming: 'material' | null = creativeTpl.trim() ? null : 'material';
 
     return campaigns.map((unitGroups, ci) => {
       // 组内文案按「本账户视频全局序号」轮转，保证相邻链路衔接、不重复起头
@@ -1246,7 +1273,13 @@ export function PlanCardMode(props: {
 
       const unitCount = unitGroups.length;
       const padUnit = (n: number) => String(n).padStart(2, '0');
-      const baseUnitName = applyTpl(unitTpl, form.unitSeqStart + ci);
+      const seq = form.unitSeqStart + ci;
+      const baseUnitName = useCustomNaming
+        ? applyTpl(form.putMode === 'auto' ? form.unitNameTpl : `${namePrefixForAccount}_[序号]`, seq)
+        : `${ts14}_${p2(seq)}`;
+      const baseCampName = useCustomNaming
+        ? baseUnitName
+        : `${campBase}-${p2(seq)}`.slice(0, 100);
       const descOf = (vi: number) =>
         form.titlesList.length > 0
           ? form.titlesList[(globalVideoIndex + vi) % form.titlesList.length]
@@ -1256,11 +1289,12 @@ export function PlanCardMode(props: {
         ...base,
         rowNo: rowNoStart + ci + 1,
         advertiserId,
-        campaignName: baseUnitName,
+        campaignName: baseCampName,
         unitName: baseUnitName,
         // 每计划最多装的组数（素材切分装填，供校验/统计参考）
         unitsPerCampaign: unitsPer,
         creativeName: applyTpl(creativeTpl, form.creativeSeqStart + ci),
+        creativeNaming,
         creativeNameSameAsMaterial: form.creativeNameSameAsMaterial,
         // 计划层
         adType: form.adType,
@@ -1733,10 +1767,12 @@ export function PlanCardMode(props: {
           k={form.putMode === 'auto' ? '广告组命名规则' : '广告组名称'}
           v={
             form.putMode === 'auto'
-              ? form.unitNameTpl || '（空，按前缀兜底）'
+              ? form.unitNameTpl || '默认规则：日期时分秒_序号'
               : form.nameMode === 'perAccount'
-                ? `分账户配置（当前账户：${form.accountNamePrefixes[form.advertiserId] || form.namePrefix || '前缀'}）`
-                : `${form.namePrefix}_01、_02…`
+                ? `分账户配置（当前账户：${form.accountNamePrefixes[form.advertiserId] || form.namePrefix || '默认规则：日期时分秒_序号'}）`
+                : form.namePrefix
+                  ? `${form.namePrefix}_01、_02…`
+                  : '默认规则：日期时分秒_序号'
           }
         />
       </SummaryCard>
@@ -2459,7 +2495,7 @@ export function PlanCardMode(props: {
                     value={form.unitNameTpl}
                     onChange={(e) => patch({ unitNameTpl: e.target.value })}
                     onBlur={() => pushHistory('plan.unitNameTpl', form.unitNameTpl)}
-                    placeholder="系统自动命名，如：批量_[日期]_[序号]"
+                    placeholder="留空=默认规则（日期时分秒_序号）；或自定义，如：批量_[日期]_[序号]"
                     maxLength={100}
                     suffix={<Typography.Text type="secondary" style={{ fontSize: 12 }}>{`${form.unitNameTpl.length}/100`}</Typography.Text>}
                   />
@@ -2511,7 +2547,7 @@ export function PlanCardMode(props: {
                     value={form.creativeNameTpl}
                     onChange={(e) => patch({ creativeNameTpl: e.target.value })}
                     onBlur={() => pushHistory('plan.creativeNameTpl', form.creativeNameTpl)}
-                    placeholder="系统自动命名，如：批量_[日期]_[序号]"
+                    placeholder="留空=默认规则（日期_素材名_序号）；或自定义模板"
                     maxLength={100}
                     suffix={<Typography.Text type="secondary" style={{ fontSize: 12 }}>{`${form.creativeNameTpl.length}/100`}</Typography.Text>}
                   />
@@ -3154,8 +3190,28 @@ export function PlanCardMode(props: {
           </Space>
         </FormRow>
 
+        <FormRow
+          label="计划类型（测试内容）"
+          tip="默认计划命名的首段，简短几个字说明本批计划测什么，如「三角洲人群包测试」「新素材跑量」。完整默认名：类型-版位-转化目标-app名称-日期时分秒-序号（空段自动跳过）"
+        >
+          <Space size={8} style={{ width: '100%' }}>
+            <Input
+              style={{ width: 280 }}
+              value={form.campaignTypeLabel}
+              onChange={(e) => patch({ campaignTypeLabel: e.target.value })}
+              onBlur={() => pushHistory('plan.campaignTypeLabel', form.campaignTypeLabel)}
+              placeholder="如：三角洲人群包测试"
+              maxLength={40}
+            />
+            <HistoryDropdown
+              histKey="plan.campaignTypeLabel"
+              onPick={(v) => patch({ campaignTypeLabel: v })}
+            />
+          </Space>
+        </FormRow>
+
         {form.putMode === 'normal' && (
-          <FormRow label="广告组名称配置" tip="对齐 mobgi：统一 / 分账户，支持账户通配符">
+          <FormRow label="广告组名称配置" tip="留空前缀 = 默认规则（组名=日期时分秒_序号）；填前缀则用 前缀_序号">
             <Space direction="vertical" size={8} style={{ width: '100%' }}>
               <ChipGroup
                 value={form.nameMode}
@@ -4596,12 +4652,6 @@ function SumItem(props: { k: string; v: string }) {
       </Tooltip>
     </div>
   );
-}
-
-function defaultPrefix(): string {
-  const d = new Date();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `批量_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
 }
 
 /** 命名规则通配符快捷插入（对齐 mobgi 磁力通配符：序号/日期/时间） */

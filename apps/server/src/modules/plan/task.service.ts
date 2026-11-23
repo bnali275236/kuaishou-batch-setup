@@ -305,6 +305,14 @@ export class TaskService {
             const seen = nameCount.get(base) ?? 0;
             nameCount.set(base, seen + 1);
             creativeName = seen === 0 ? base : `${base.slice(0, 118)}-${seen + 1}`;
+          } else if (row.creativeNaming === 'material') {
+            // 默认规则（2026-11-23 用户拍板）：日期_素材名_序号；素材名缺失回落行创意名。
+            // 序号保证组内唯一（平台校验组内创意名不重复）。
+            const mat = (video.name ?? '').trim();
+            const p2 = (n: number) => String(n).padStart(2, '0');
+            const d = new Date();
+            const d8 = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}`;
+            creativeName = `${d8}_${mat || row.creativeName}_${padCreative(ci + 1)}`.slice(0, 127);
           } else {
             // 模板模式：多视频时创意名必须组内唯一，带上 -创XX 后缀（与 displayName 一致）
             creativeName =
