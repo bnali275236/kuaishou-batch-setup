@@ -86,13 +86,15 @@ export class ReportController {
   /**
    * 创意属性赛马（细则 1124）：把创意级报表按「广告语 / 标签组合 / 单标签 /
    * 创意分类 / 行动号召」聚合，回答「哪句文案 / 哪组标签跑得好」。
+   * 支持多账户汇总：advertiserIds=逗号分隔（同名属性跨账户合计），不传则取单账户 advertiserId。
    * 首次调用会自动全量同步创意属性（1 小时缓存，sync=1 强制刷新）。
    */
   @Get('creative-attrs')
   async creativeAttrsRank(
-    @Query('advertiserId') advertiserId: string,
-    @Query('startDate') startDate: string,
-    @Query('endDate') endDate: string,
+    @Query('advertiserId') advertiserId?: string,
+    @Query('advertiserIds') advertiserIdsRaw?: string,
+    @Query('startDate') startDate: string = '',
+    @Query('endDate') endDate: string = '',
     @Query('groupBy') groupByRaw?: string,
     @Query('sync') sync?: string,
   ) {
@@ -101,20 +103,46 @@ export class ReportController {
     )
       ? (groupByRaw as AttrGroupBy)
       : 'tags';
-    const syncRes = await this.creativeAttrs.sync(String(advertiserId ?? ''), sync === '1');
-    const page = await this.report.query('creative', {
-      advertiserId: String(advertiserId ?? ''),
-      startDate,
-      endDate,
-      page: 1,
-      pageSize: MAX_PAGE_SIZE,
-    });
-    const ranked = await this.creativeAttrs.aggregate(
-      String(advertiserId ?? ''),
-      (page.rows ?? []) as unknown as Record<string, unknown>[],
+    const ids = [
+      ...new Set(
+        [
+          ...(advertiserIdsRaw ? advertiserIdsRaw.split(',').map((s) => s.trim()) : []),
+          ...(advertiserId ? [String(advertiserId)] : []),
+        ].filter(Boolean),
+      ),
+    ];
+    // 多账户并发：逐户同步属性（1h 缓存）+ 拉创意实时报表，行合并后统一聚合
+    const [syncResults, rowLists] = await Promise.all([
+      Promise.all(ids.map((id) => this.creativeAttrs.sync(id, sync === '1').catch(() => ({ count: 0, skipped: true })))),
+      Promise.all(
+        ids.map((id) =>
+          this.report
+            .query('creative', {
+              advertiserId: id,
+              startDate,
+              endDate,
+              page: 1,
+              pageSize: MAX_PAGE_SIZE,
+            })
+            .then((p) => (p.rows ?? []) as unknown as Record<string, unknown>[])
+            .catch(() => [] as Record<string, unknown>[]),
+        ),
+      ),
+    ]);
+    const allRows = rowLists.flat();
+    const ranked = await this.creativeAttrs.aggregate(ids, allRows, groupBy);
+    return {
       groupBy,
-    );
-    return { groupBy, synced: syncRes, rows: ranked };
+      accounts: ids,
+      synced:
+        ids.length === 1
+          ? syncResults[0]
+          : {
+              count: syncResults.reduce((s, r) => s + (r.count || 0), 0),
+              skipped: syncResults.every((r) => r.skipped),
+            },
+      rows: ranked,
+    };
   }
 
   /** 手动触发历史回补（异步任务，每日配额 18 个账户） */

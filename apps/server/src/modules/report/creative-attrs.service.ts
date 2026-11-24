@@ -139,17 +139,19 @@ export class CreativeAttrsService {
 
   /**
    * 按属性维度聚合创意报表。
+   * @param advertiserIds 单个账户或多个账户（汇总赛马：同名广告语/标签跨账户合计）
    * @param rows 创意级报表行（controller 先查好再传进来）
    * @param groupBy 聚合维度；tags=标签组合（全组合），tag=单标签展开（一个标签一行）
    */
   async aggregate(
-    advertiserId: string,
+    advertiserIds: string | string[],
     rows: Record<string, unknown>[],
     groupBy: AttrGroupBy,
   ): Promise<Array<Record<string, unknown>>> {
+    const ids = Array.isArray(advertiserIds) ? advertiserIds : [advertiserIds];
     const creativeIds = [...new Set(rows.map((r) => String(r.creativeId || '')))].filter(Boolean);
     const attrs = await this.prisma.creativeAttribute.findMany({
-      where: { advertiserId, creativeId: { in: creativeIds } },
+      where: { advertiserId: { in: ids }, creativeId: { in: creativeIds } },
     });
     const attrMap = new Map(attrs.map((a) => [a.creativeId, a]));
 

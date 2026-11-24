@@ -1092,17 +1092,539 @@ function MaterialLibraryPanel({ accounts }: { accounts: AccountSummary[] }) {
 /** 一级面板切换，记住用户上次停留在哪 */
 const CENTER_VIEW_KEY = 'wkbd_material_center_view';
 
+/* ------------------------------------------------------------------
+ * 创意属性面板（细则 1124 赛马追踪）：按「标签组合 / 单标签 / 广告语 /
+ * 原生广告语 / 创意分类 / 行动号召」聚合创意报表，回答哪句文案跑得好。
+ * 数据口径 = 创意级实时报表（平台仅开放近 7 天）× 本地创意属性快照。
+ * ------------------------------------------------------------------ */
+
+interface AttrRankRow {
+  key: string;
+  creatives: number;
+  charge: number;
+  activation: number;
+  actCost: number | null;
+  payCount: number;
+  payCost: number | null;
+}
+
+interface AttrRankResult {
+  groupBy: string;
+  synced: { count: number; skipped: boolean };
+  rows: AttrRankRow[];
+}
+
+const ATTR_DIMS: Array<{ value: string; label: string }> = [
+  { value: 'tags', label: '标签组合' },
+  { value: 'tag', label: '单标签' },
+  { value: 'description', label: '广告语' },
+  { value: 'plcDescription', label: '原生广告语' },
+  { value: 'category', label: '创意分类' },
+  { value: 'actionBar', label: '行动号召' },
+];
+
+function CreativeAttrsPanel({ accounts }: { accounts: AccountSummary[] }) {
+  const { modal, message } = App.useApp();
+
+  /** 多账户汇总：默认全选（同名广告语/标签跨账户合计），可缩小到单账户 */
+  const [advertiserIds, setAdvertiserIds] = useState<string[]>([]);
+  useEffect(() => {
+    if (advertiserIds.length === 0 && accounts.length > 0) setAdvertiserIds(accounts.map((a) => a.advertiserId));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accounts]);
+
+  /** 实时报表仅近 7 天，日期钳制在窗口内 */
+  const [lookback, setLookback] = useState(7);
+  useEffect(() => {
+    api
+      .get<{ realtimeLookbackDays: number }>('/api/report/meta')
+      .then((m) => setLookback(Math.max(m.realtimeLookbackDays, 1)))
+      .catch(() => setLookback(7));
+  }, []);
+  const [range, setRange] = useState<[Dayjs, Dayjs]>(() => [
+    dayjs().subtract(6, 'day'),
+    dayjs(),
+  ]);
+
+  const [groupBy, setGroupBy] = useState<string>('tags');
+  const [result, setResult] = useState<AttrRankResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const loadedRef = useRef<string | null>(null);
+
+  /** 日期钳制：起止都限制在实时窗口内（最早 = 今天-(lookback-1)） */
+  const clampDate = (d: Dayjs) => {
+    const min = dayjs().subtract(lookback - 1, 'day');
+    if (d.isBefore(min, 'day')) return min;
+    if (d.isAfter(dayjs(), 'day')) return dayjs();
+    return d;
+  };
+
+  const load = useCallback(
+    async (sync = false) => {
+      if (advertiserIds.length === 0) return;
+      sync ? setSyncing(true) : setLoading(true);
+      try {
+        const qs = new URLSearchParams({
+          advertiserIds: advertiserIds.join(','),
+          startDate: range[0].format('YYYY-MM-DD'),
+          endDate: range[1].format('YYYY-MM-DD'),
+          groupBy,
+          ...(sync ? { sync: '1' } : {}),
+        });
+        const r = await api.get<AttrRankResult>(`/api/report/creative-attrs?${qs.toString()}`);
+        setResult(r);
+        loadedRef.current = `${advertiserIds.join(',')}|${groupBy}|${range[0].format('YYYY-MM-DD')}|${range[1].format('YYYY-MM-DD')}`;
+        if (sync && r.synced?.count > 0) message.success(`已同步 ${r.synced.count} 条创意属性`);
+      } catch (err) {
+        modal.error({ title: '创意属性聚合失败', content: explainError(err) });
+      } finally {
+        setSyncing(false);
+        setLoading(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [advertiserIds, groupBy, range],
+  );
+
+  // 首次进入 / 条件变化自动加载一次
+  const condKey = advertiserIds.length > 0 ? `${advertiserIds.join(',')}|${groupBy}|${range[0].format('YYYY-MM-DD')}|${range[1].format('YYYY-MM-DD')}` : '';
+  useEffect(() => {
+    if (!condKey || loadedRef.current === condKey) return;
+    loadedRef.current = condKey;
+    void load(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [condKey]);
+
+  const columns: ColumnsType<AttrRankRow> = [
+    {
+      title: '维度值',
+      dataIndex: 'key',
+      width: 380,
+      render: (v: string) => (
+        <div
+          style={{
+            fontSize: 13,
+            wordBreak: 'break-all',
+            maxHeight: 66,
+            overflow: 'hidden',
+          }}
+          title={v}
+        >
+          {v}
+        </div>
+      ),
+    },
+    {
+      title: '创意数',
+      dataIndex: 'creatives',
+      align: 'right',
+      width: 90,
+      sorter: (a, b) => a.creatives - b.creatives,
+      render: (v: number) => fmtInt(v),
+    },
+    {
+      title: '消耗(元)',
+      dataIndex: 'charge',
+      align: 'right',
+      width: 110,
+      sorter: (a, b) => a.charge - b.charge,
+      defaultSortOrder: 'descend',
+      render: (v: number) => <b>{fmtMoney(v)}</b>,
+    },
+    {
+      title: '激活数',
+      dataIndex: 'activation',
+      align: 'right',
+      width: 90,
+      sorter: (a, b) => a.activation - b.activation,
+      render: (v: number) => (v > 0 ? fmtInt(v) : '—'),
+    },
+    {
+      title: (
+        <Tooltip title="激活成本 = 消耗 ÷ 激活数">
+          <span>激活成本(元)</span>
+        </Tooltip>
+      ),
+      dataIndex: 'actCost',
+      align: 'right',
+      width: 110,
+      sorter: (a, b) => (a.actCost ?? 1e9) - (b.actCost ?? 1e9),
+      render: (v: number | null) => (v != null ? fmtMoney(v) : '—'),
+    },
+    {
+      title: '付费次数',
+      dataIndex: 'payCount',
+      align: 'right',
+      width: 90,
+      sorter: (a, b) => a.payCount - b.payCount,
+      render: (v: number) => (v > 0 ? fmtInt(v) : '—'),
+    },
+    {
+      title: (
+        <Tooltip title="付费成本 = 消耗 ÷ 付费次数">
+          <span>付费成本(元)</span>
+        </Tooltip>
+      ),
+      dataIndex: 'payCost',
+      align: 'right',
+      width: 110,
+      sorter: (a, b) => (a.payCost ?? 1e9) - (b.payCost ?? 1e9),
+      render: (v: number | null) => (v != null ? fmtMoney(v) : '—'),
+    },
+  ];
+
+  const accountOptions = accounts.map((a) => ({
+    value: a.advertiserId,
+    label: a.accountName ? `${a.accountName}（${a.advertiserId}）` : a.advertiserId,
+  }));
+
+  return (
+    <Card size="small">
+      {/* 工具条：账户（多选默认全选=汇总） + 日期 + 维度 + 操作 */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+        <Select
+          showSearch
+          mode="multiple"
+          allowClear
+          optionFilterProp="label"
+          maxTagCount="responsive"
+          placeholder="选择账户（不选 = 全部账户汇总）"
+          style={{ minWidth: 320, maxWidth: 620, flex: '1 1 320px' }}
+          value={advertiserIds}
+          onChange={(v) => {
+            loadedRef.current = null;
+            setAdvertiserIds(v);
+          }}
+          options={accountOptions}
+          disabled={accounts.length === 0}
+        />
+        <DatePicker.RangePicker
+          value={[clampDate(range[0]), clampDate(range[1])]}
+          allowClear={false}
+          disabledDate={(d) => {
+            const min = dayjs().subtract(lookback - 1, 'day');
+            return d.isAfter(dayjs(), 'day') || d.isBefore(min, 'day');
+          }}
+          onChange={(v) => {
+            if (v?.[0] && v?.[1]) {
+              loadedRef.current = null;
+              setRange([clampDate(v[0]), clampDate(v[1])]);
+            }
+          }}
+        />
+        <Select
+          style={{ width: 140 }}
+          value={groupBy}
+          onChange={(v) => {
+            loadedRef.current = null;
+            setGroupBy(v);
+          }}
+          options={ATTR_DIMS}
+        />
+        <Button
+          icon={<SyncOutlined />}
+          loading={syncing}
+          disabled={advertiserIds.length === 0}
+          title="从平台全量回读创意列表，更新本地属性快照（创建创意时已入库，一般无需手点）"
+          onClick={() => void load(true)}
+        >
+          同步属性
+        </Button>
+        <Button icon={<ReloadOutlined />} loading={loading} disabled={advertiserIds.length === 0} onClick={() => void load(false)}>
+          刷新
+        </Button>
+      </div>
+
+      <Typography.Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 8 }}>
+        按「{ATTR_DIMS.find((d) => d.value === groupBy)?.label}」维度聚合创意报表（实时口径，平台仅开放近 7 天），
+        属性快照来自本地创意属性库（创编时入库 + 平台列表同步）。
+        当前范围：{advertiserIds.length === 0 ? '未选账户' : advertiserIds.length === accounts.length ? `全部 ${advertiserIds.length} 个账户汇总` : `${advertiserIds.length} 个账户汇总`}。
+        用途：赛马追踪哪句广告语 / 哪组标签 / 哪个行动号召跑得好，优选复用。
+      </Typography.Text>
+
+      {advertiserIds.length === 0 ? (
+        <Empty description="暂无可用账户" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ padding: 32 }} />
+      ) : loading && !result ? (
+        <div style={{ textAlign: 'center', padding: 40 }}>
+          <Spin />
+        </div>
+      ) : !result || result.rows.length === 0 ? (
+        <Empty
+          description="该区间没有创意投放数据（或创意属性还没同步，点「同步属性」后重试）"
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          style={{ padding: 32 }}
+        />
+      ) : (
+        <Table<AttrRankRow>
+          rowKey={(r) => r.key}
+          size="small"
+          columns={columns}
+          dataSource={result.rows}
+          pagination={{ pageSize: 20, showSizeChanger: true, pageSizeOptions: [20, 50, 100], showTotal: (t) => `共 ${t} 条` }}
+          footer={() => (
+            <span style={{ fontSize: 12, color: '#888780' }}>
+              数据时间：{dayjs().format('YYYY-MM-DD HH:mm:ss')}（平台实时）
+              {result.synced?.skipped === false && result.synced.count > 0 ? ` · 本次同步 ${result.synced.count} 条属性` : ''}
+            </span>
+          )}
+        />
+      )}
+    </Card>
+  );
+}
+
+/* ------------------------------------------------------------------
+ * 人群包面板：各账户 dmp/population/list 汇总展示。
+ * 人群包是账户级资产 —— 同一个包在 N 个账户下各有一份授权，
+ * 这里按人群包 ID 去重合并，并标记它出现在哪些账户下（建计划选定向时参考）。
+ * ------------------------------------------------------------------ */
+
+interface PopRow {
+  id: string;
+  name: string;
+  /** 包内人数（record_size，标签包退 cover_num） */
+  recordSize: number;
+  status: number;
+  usable: boolean;
+  coverWan: number;
+  /** 平台侧校验/创建时间（有值才显示） */
+  verifiedAt: string | null;
+  /** 归属账户显示名列表 */
+  owners: string[];
+}
+
+function PopulationPanel({ accounts }: { accounts: AccountSummary[] }) {
+  const { modal } = App.useApp();
+
+  /** 多账户：默认全选 */
+  const [advertiserIds, setAdvertiserIds] = useState<string[]>([]);
+  useEffect(() => {
+    if (advertiserIds.length === 0 && accounts.length > 0) setAdvertiserIds(accounts.map((a) => a.advertiserId));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accounts]);
+
+  const [rows, setRows] = useState<PopRow[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const loadedRef = useRef<string | null>(null);
+
+  const nameOf = useCallback(
+    (id: string) => {
+      const a = accounts.find((x) => x.advertiserId === id);
+      return a?.accountName ? `${a.accountName}（${id}）` : id;
+    },
+    [accounts],
+  );
+
+  const load = useCallback(
+    async (force = false) => {
+      if (advertiserIds.length === 0) return;
+      setLoading(true);
+      const key = `${advertiserIds.join(',')}|${force ? 'f1' : 'f0'}`;
+      try {
+        const lists = await Promise.all(
+          advertiserIds.map(async (id) => {
+            try {
+              return await api.get<Array<Record<string, unknown>>>(
+                `/api/plan/assets/populations?advertiserId=${encodeURIComponent(id)}${force ? '&force=1' : ''}`,
+              );
+            } catch {
+              return [] as Array<Record<string, unknown>>;
+            }
+          }),
+        );
+        // 按 ID 合并，同一包出现在多个账户时汇总归属
+        const merged = new Map<string, PopRow>();
+        lists.forEach((list, idx) => {
+          const accId = advertiserIds[idx];
+          for (const it of list ?? []) {
+            const id = String(it.id ?? '');
+            if (!id) continue;
+            const prev = merged.get(id);
+            if (prev) {
+              if (!prev.owners.includes(nameOf(accId))) prev.owners.push(nameOf(accId));
+              continue;
+            }
+            merged.set(id, {
+              id,
+              name: String(it.name ?? id),
+              recordSize: Number(it.recordSize ?? 0),
+              status: Number(it.status ?? 0),
+              usable: Boolean(it.usable),
+              coverWan: Number(it.coverWan ?? 0),
+              verifiedAt: (it.raw as Record<string, unknown> | undefined)?.verify_time
+                ? String((it.raw as Record<string, unknown>).verify_time)
+                : null,
+              owners: [nameOf(accId)],
+            });
+          }
+        });
+        const out = [...merged.values()].sort((a, b) => b.recordSize - a.recordSize);
+        setRows(out);
+        loadedRef.current = key;
+      } catch (err) {
+        modal.error({ title: '人群包读取失败', content: explainError(err) });
+      } finally {
+        setLoading(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [advertiserIds, nameOf],
+  );
+
+  const condKey = advertiserIds.length > 0 ? advertiserIds.join(',') : '';
+  useEffect(() => {
+    if (!condKey || loadedRef.current === condKey) return;
+    loadedRef.current = condKey;
+    void load(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [condKey]);
+
+  const popColumns: ColumnsType<PopRow> = [
+    {
+      title: '人群包名称',
+      dataIndex: 'name',
+      width: 340,
+      render: (v: string) => (
+        <div style={{ fontSize: 13, wordBreak: 'break-all', maxHeight: 66, overflow: 'hidden' }} title={v}>
+          {v}
+        </div>
+      ),
+    },
+    {
+      title: '人群包 ID',
+      dataIndex: 'id',
+      width: 130,
+      render: (v: string) => <Typography.Text copyable={{ text: v }} style={{ fontSize: 12 }}>{v}</Typography.Text>,
+    },
+    {
+      title: (
+        <Tooltip title="包内人数：上传/推送包取 record_size，标签包退 cover_num">
+          <span>规模(万)</span>
+        </Tooltip>
+      ),
+      dataIndex: 'coverWan',
+      align: 'right',
+      width: 110,
+      sorter: (a, b) => a.recordSize - b.recordSize,
+      defaultSortOrder: 'descend',
+      render: (v: number) => fmtInt(v),
+    },
+    {
+      title: '状态',
+      dataIndex: 'usable',
+      align: 'center',
+      width: 90,
+      filters: [
+        { text: '可用', value: 'usable' },
+        { text: '不可用', value: 'unusable' },
+      ],
+      onFilter: (v, r) => (v === 'usable' ? r.usable : !r.usable),
+      render: (_: unknown, r: PopRow) =>
+        r.usable ? <Tag color="green">可用</Tag> : <Tag color="default">不可用</Tag>,
+    },
+    {
+      title: '归属账户',
+      dataIndex: 'owners',
+      width: 220,
+      render: (v: string[]) =>
+        v.length <= 2 ? (
+          <span style={{ fontSize: 12 }}>{v.join('、')}</span>
+        ) : (
+          <Tooltip title={v.join('、')}>
+            <span style={{ fontSize: 12 }}>{v.length} 个账户</span>
+          </Tooltip>
+        ),
+    },
+    {
+      title: '平台校验时间',
+      dataIndex: 'verifiedAt',
+      width: 160,
+      render: (v: string | null) => <span style={{ fontSize: 12, color: '#888780' }}>{v ?? '—'}</span>,
+    },
+  ];
+
+  const accountOptions = accounts.map((a) => ({
+    value: a.advertiserId,
+    label: a.accountName ? `${a.accountName}（${a.advertiserId}）` : a.advertiserId,
+  }));
+
+  return (
+    <Card size="small">
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+        <Select
+          showSearch
+          mode="multiple"
+          allowClear
+          optionFilterProp="label"
+          maxTagCount="responsive"
+          placeholder="选择账户（不选 = 全部账户）"
+          style={{ minWidth: 320, maxWidth: 620, flex: '1 1 320px' }}
+          value={advertiserIds}
+          onChange={(v) => {
+            loadedRef.current = null;
+            setAdvertiserIds(v);
+          }}
+          options={accountOptions}
+          disabled={accounts.length === 0}
+        />
+        <Button
+          icon={<SyncOutlined />}
+          loading={loading}
+          disabled={advertiserIds.length === 0}
+          title="绕开 10 分钟缓存，直接从平台重拉人群包"
+          onClick={() => void load(true)}
+        >
+          强制刷新
+        </Button>
+      </div>
+
+      <Typography.Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 8 }}>
+        账户人群包资产汇总（平台 dmp/population/list，本地缓存 10 分钟）。
+        当前范围：{advertiserIds.length === 0 ? '未选账户' : advertiserIds.length === accounts.length ? `全部 ${advertiserIds.length} 个账户` : `${advertiserIds.length} 个账户`}。
+        同名包在多个账户各有一份授权 → 已按 ID 合并并在「归属账户」里标记，建计划选定向时直接复制 ID 使用。
+      </Typography.Text>
+
+      {advertiserIds.length === 0 ? (
+        <Empty description="暂无可用账户" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ padding: 32 }} />
+      ) : loading && !rows ? (
+        <div style={{ textAlign: 'center', padding: 40 }}>
+          <Spin />
+        </div>
+      ) : !rows || rows.length === 0 ? (
+        <Empty description="所选账户下没有人群包（可在磁力引擎 DMP 或本工作台建计划流程里创建）" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ padding: 32 }} />
+      ) : (
+        <Table<PopRow>
+          rowKey={(r) => r.id}
+          size="small"
+          columns={popColumns}
+          dataSource={rows}
+          pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 个` }}
+          footer={() => (
+            <span style={{ fontSize: 12, color: '#888780' }}>
+              可用 {rows.filter((r) => r.usable).length} / {rows.length} 个 · 数据时间：{dayjs().format('YYYY-MM-DD HH:mm:ss')}
+            </span>
+          )}
+        />
+      )}
+    </Card>
+  );
+}
+
 export default function MaterialBoardPage() {
   const { modal, message } = App.useApp();
 
-  const [view, setView] = useState<'board' | 'library'>(() => {
-    try {
-      return localStorage.getItem(CENTER_VIEW_KEY) === 'library' ? 'library' : 'board';
-    } catch {
-      return 'board';
-    }
+  const [view, setView] = useState<'board' | 'library' | 'attrs' | 'pops'>(() => {
+    const v = (() => {
+      try {
+        return localStorage.getItem(CENTER_VIEW_KEY);
+      } catch {
+        return null;
+      }
+    })();
+    return v === 'library' || v === 'attrs' || v === 'pops' ? v : 'board';
   });
-  const switchView = (v: 'board' | 'library') => {
+  const switchView = (v: 'board' | 'library' | 'attrs' | 'pops') => {
     setView(v);
     try {
       localStorage.setItem(CENTER_VIEW_KEY, v);
@@ -1336,22 +1858,32 @@ export default function MaterialBoardPage() {
           <h2 style={{ margin: 0 }}>素材中心</h2>
           <Segmented
             value={view}
-            onChange={(v) => switchView(v as 'board' | 'library')}
+            onChange={(v) => switchView(v as 'board' | 'library' | 'attrs' | 'pops')}
             options={[
               { value: 'board', label: '素材看板' },
               { value: 'library', label: '素材库' },
+              { value: 'attrs', label: '创意属性' },
+              { value: 'pops', label: '人群包' },
             ]}
           />
         </div>
         <p>
           {view === 'board'
             ? '覆盖全部账户的全部素材。历史数据取自本地永久库 —— 平台实时报表只开放近 7 天，工作台每天自动同步并永久保留，因此可长期回溯与分析；今日数据为平台实时值。点素材行可展开查看该素材在各账户下的明细。'
-            : '账户素材库管理：浏览平台素材、上传本地视频到账户素材库。上传的素材可直接在「上计划 → 选择素材」里勾选使用。'}
+            : view === 'library'
+              ? '账户素材库管理：浏览平台素材、上传本地视频到账户素材库。上传的素材可直接在「上计划 → 选择素材」里勾选使用。'
+              : view === 'attrs'
+                ? '创意属性赛马（细则 1124）：按标签组合 / 单标签 / 广告语 / 原生广告语 / 创意分类 / 行动号召聚合创意报表，默认汇总全部账户，同名文案跨账户合计，追踪哪句文案、哪组标签跑得好，优选复用。'
+                : '账户人群包列表：查看各账户可用的人群定向包（含规模与可用状态），供建计划选定向时参考。'}
         </p>
       </div>
 
       {view === 'library' ? (
         <MaterialLibraryPanel accounts={usable} />
+      ) : view === 'attrs' ? (
+        <CreativeAttrsPanel accounts={usable} />
+      ) : view === 'pops' ? (
+        <PopulationPanel accounts={usable} />
       ) : (
         <>
           <Card size="small" style={{ marginBottom: 12 }}>

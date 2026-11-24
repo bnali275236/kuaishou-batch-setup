@@ -321,6 +321,24 @@ const trendMetricOf = (key: TrendMetricKey) => TREND_METRICS.find((m) => m.key =
  * 「拉取数据」按钮才强制重新请求，新参数没有缓存时自动拉一次
  * ------------------------------------------------------------------ */
 const CACHE_KEY = 'wkbd_dash_cache_v2';
+/** 自动刷新偏好（长期开关：点一次记住，切页/重开都保持） */
+const AUTO_REFRESH_KEY = 'wkbd_dash_auto_refresh';
+
+function readAutoRefresh(): boolean {
+  try {
+    return localStorage.getItem(AUTO_REFRESH_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function writeAutoRefresh(on: boolean): void {
+  try {
+    localStorage.setItem(AUTO_REFRESH_KEY, on ? '1' : '0');
+  } catch {
+    /* ignore */
+  }
+}
 
 interface CacheEntry {
   result: OverviewResult;
@@ -379,7 +397,8 @@ export default function DashboardPage() {
 
   const [selected, setSelected] = useState<string[]>([]);
   const [range, setRange] = useState<[Dayjs, Dayjs]>(() => [dayjs(), dayjs()]);
-  const [autoRefresh, setAutoRefresh] = useState(false);
+  /** 自动刷新：持久化在本地，切标签 / 刷新页面 / 重开浏览器都保持上次的选择 */
+  const [autoRefresh, setAutoRefresh] = useState<boolean>(readAutoRefresh);
 
   const [result, setResult] = useState<OverviewResult | null>(null);
   const [trend, setTrend] = useState<TrendResponse | null>(null);
@@ -462,6 +481,12 @@ export default function DashboardPage() {
   // 自动刷新：每 5 分钟重拉一次并写缓存
   useEffect(() => {
     if (!autoRefresh) return;
+    // 切回本页时缓存可能已过期（组件卸载期间定时器不跑）：超过 5 分钟就立刻补拉一次，
+    // 不然要傻等满一个周期才有新数。（无缓存的情况由上面 paramKey 的 effect 负责首拉）
+    const cached = readCache()[paramKeyRef.current];
+    if (cached && Date.now() - new Date(cached.savedAt).getTime() > 5 * 60_000) {
+      void fetchData(paramKeyRef.current);
+    }
     const timer = setInterval(() => void fetchData(paramKeyRef.current), 5 * 60_000);
     return () => clearInterval(timer);
   }, [autoRefresh, fetchData]);
@@ -840,7 +865,11 @@ export default function DashboardPage() {
 
             <Segmented
               value={autoRefresh ? 'on' : 'off'}
-              onChange={(v) => setAutoRefresh(v === 'on')}
+              onChange={(v) => {
+                const on = v === 'on';
+                setAutoRefresh(on);
+                writeAutoRefresh(on);
+              }}
               options={[
                 { label: '手动刷新', value: 'off' },
                 { label: '自动 5 分钟', value: 'on' },
