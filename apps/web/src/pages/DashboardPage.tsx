@@ -16,6 +16,8 @@ import type { AccountSummary } from '@wkbd/shared';
 import { useBoardTable } from '../components/BoardTable';
 import { quickPresets } from '../components/QuickRanges';
 import { AccountDrawer } from './dashboard/AccountDrawer';
+import { buildCreativeColumns, buildUnitColumns } from './dashboard/hierColumns';
+import { hierRowMatches, useHierarchy, type DetailLevel, type HierRow } from './dashboard/useHierarchy';
 
 interface OverviewTotals {
   charge: number;
@@ -340,6 +342,26 @@ function writeAutoRefresh(on: boolean): void {
   }
 }
 
+/** 账户明细的展示层级（账户 / 广告组 / 创意），同样按浏览器记住 */
+const DETAIL_LEVEL_KEY = 'wkbd_dash_detail_level';
+
+function readDetailLevel(): DetailLevel {
+  try {
+    const v = localStorage.getItem(DETAIL_LEVEL_KEY);
+    return v === 'unit' || v === 'creative' ? v : 'account';
+  } catch {
+    return 'account';
+  }
+}
+
+function writeDetailLevel(v: DetailLevel): void {
+  try {
+    localStorage.setItem(DETAIL_LEVEL_KEY, v);
+  } catch {
+    /* ignore */
+  }
+}
+
 interface CacheEntry {
   result: OverviewResult;
   /** 单日小时走势（hours = 合计；byAccount = 每账户明细，筛选后现场聚合） */
@@ -409,6 +431,8 @@ export default function DashboardPage() {
   const [keyword, setKeyword] = useState('');
   /** 分时走势是否收起（大屏盯盘时可让明细表上移） */
   const [chartCollapsed, setChartCollapsed] = useState(false);
+  /** 明细表展示层级：账户（默认）/ 广告组 / 创意 —— 后两者直接平铺所有账户的组、创意 */
+  const [detailLevel, setDetailLevel] = useState<DetailLevel>(readDetailLevel);
 
   // 默认全选可用账户
   const effectiveSelection = selected.length > 0 ? selected : usable.map((a) => a.advertiserId);
@@ -505,6 +529,39 @@ export default function DashboardPage() {
       (a) => (a.accountName ?? '').toLowerCase().includes(keywordTrim) || a.advertiserId.includes(keywordTrim),
     );
   }, [result, keywordTrim]);
+
+  /* —— 组 / 创意层级明细 ——
+   * 平台只提供单账户的组/创意接口，这里按账户扇出后平铺成一张表；
+   * 结构 5 分钟进程内复用（切组↔创意不重复拉），结果按「层级+账户集+日期」落本地缓存。 */
+  const hierAccounts = useMemo(
+    () =>
+      (result?.accounts ?? []).map((a) => ({
+        advertiserId: a.advertiserId,
+        accountName: a.accountName ?? null,
+      })),
+    [result],
+  );
+  const hierToday = dayjs().format('YYYY-MM-DD');
+  const hierMinDate = dayjs().subtract(6, 'day').format('YYYY-MM-DD');
+  const hierStart = startDate < hierMinDate ? hierMinDate : startDate;
+  const hierEnd = endDate > hierToday ? hierToday : endDate;
+  const hierRangeClamped = hierStart !== startDate || hierEnd !== endDate;
+  const hier = useHierarchy({
+    level: detailLevel,
+    accounts: hierAccounts,
+    startDate: hierStart,
+    endDate: hierEnd,
+  });
+  const hierRows = useMemo(
+    () => (keywordTrim ? hier.rows.filter((r) => hierRowMatches(r, keywordTrim)) : hier.rows),
+    [hier.rows, keywordTrim],
+  );
+  /** 层级表里一条都没返回的账户：全自动投放（UAX）账户平台不下发组/创意列表，只能看账户级数据 */
+  const hierEmptyAccounts = useMemo(() => {
+    if (hier.loading || hier.rows.length === 0) return [];
+    const has = new Set(hier.rows.map((r) => r.advertiserId));
+    return hierAccounts.filter((a) => !has.has(a.advertiserId));
+  }, [hier.loading, hier.rows, hierAccounts]);
 
   /**
    * 图表数据源：单日 = 小时行（HH:00 横坐标）；多天 = overview.daily（MM-DD 横坐标），始终有图。
@@ -756,6 +813,54 @@ export default function DashboardPage() {
     },
   });
 
+  /* 组 / 创意明细表各自一套列配置（列宽、显隐、导出都独立持久化） */
+  const unitColumns = useMemo(() => buildUnitColumns(setDrill), []);
+  const creativeColumns = useMemo(() => buildCreativeColumns(setDrill), []);
+  const unitBoard = useBoardTable<HierRow>({
+    storageKey: 'dashboard-units',
+    columns: unitColumns,
+    exportFileName: `广告组明细_${hierStart}_${hierEnd}`,
+    exportRows: () => hierRows as unknown as Array<Record<string, unknown>>,
+    exportValueOf: {
+      account: (row) => {
+        const r = row as unknown as HierRow;
+        return r.accountName ? `${r.accountName}（${r.advertiserId}）` : r.advertiserId;
+      },
+      campaign: (row) => {
+        const r = row as unknown as HierRow;
+        return r.campaignName ?? r.campaignId ?? '';
+      },
+      unit: (row) => {
+        const r = row as unknown as HierRow;
+        return r.unitName ?? r.unitId ?? '';
+      },
+    },
+  });
+  const creativeBoard = useBoardTable<HierRow>({
+    storageKey: 'dashboard-creatives',
+    columns: creativeColumns,
+    exportFileName: `创意明细_${hierStart}_${hierEnd}`,
+    exportRows: () => hierRows as unknown as Array<Record<string, unknown>>,
+    exportValueOf: {
+      account: (row) => {
+        const r = row as unknown as HierRow;
+        return r.accountName ? `${r.accountName}（${r.advertiserId}）` : r.advertiserId;
+      },
+      campaign: (row) => {
+        const r = row as unknown as HierRow;
+        return r.campaignName ?? r.campaignId ?? '';
+      },
+      unit: (row) => {
+        const r = row as unknown as HierRow;
+        return r.unitName ?? r.unitId ?? '';
+      },
+      creative: (row) => {
+        const r = row as unknown as HierRow;
+        return r.creativeName ?? r.creativeId ?? '';
+      },
+    },
+  });
+
   /** 代投白名单（只读）账户集合：下钻抽屉里隐藏全部调整操作 */
   const readOnlySet = useMemo(
     () => new Set((accounts ?? []).filter((a) => a.readOnly).map((a) => a.advertiserId)),
@@ -984,54 +1089,167 @@ export default function DashboardPage() {
             size="small"
             title={
               <span>
-                账户明细（
-                {keywordTrim ? `${filteredAccounts.length} / ${result.accounts.length}` : result.accounts.length} 个）
+                {detailLevel === 'account'
+                  ? `账户明细（${
+                      keywordTrim ? `${filteredAccounts.length} / ${result.accounts.length}` : result.accounts.length
+                    } 个）`
+                  : detailLevel === 'unit'
+                    ? `广告组明细（${hierRows.length} 个组 · ${hierAccounts.length} 个账户）`
+                    : `创意明细（${hierRows.length} 个创意 · ${hierAccounts.length} 个账户）`}
                 <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 'normal' }}>
                   {' '}
-                  —— 点击「进入账户」查看计划/组/创意并调整
+                  {detailLevel === 'account'
+                    ? '—— 点击「进入账户」查看计划/组/创意并调整'
+                    : `—— 指标为 ${hierStart} ~ ${hierEnd} 合计；点账户名进入下钻调整`}
                 </Typography.Text>
               </span>
             }
             extra={
               <Space size={8} wrap>
+                <Segmented
+                  size="small"
+                  value={detailLevel}
+                  onChange={(v) => {
+                    const lv = v as DetailLevel;
+                    setDetailLevel(lv);
+                    writeDetailLevel(lv);
+                  }}
+                  options={[
+                    { label: '账户', value: 'account' },
+                    { label: '广告组', value: 'unit' },
+                    { label: '创意', value: 'creative' },
+                  ]}
+                />
                 <Input
                   allowClear
                   size="small"
                   style={{ width: 210 }}
                   prefix={<SearchOutlined style={{ color: '#B8B5AC' }} />}
-                  placeholder="搜索账户名 / 账户 ID"
+                  placeholder={
+                    detailLevel === 'account'
+                      ? '搜索账户名 / 账户 ID'
+                      : detailLevel === 'unit'
+                        ? '搜索账户 / 计划 / 广告组'
+                        : '搜索账户 / 组 / 创意'
+                  }
                   value={keyword}
                   onChange={(e) => setKeyword(e.target.value)}
                 />
-                {board.toolbar}
+                {detailLevel === 'account'
+                  ? board.toolbar
+                  : detailLevel === 'unit'
+                    ? unitBoard.toolbar
+                    : creativeBoard.toolbar}
+                {detailLevel !== 'account' && (
+                  <Tooltip title="重新拉取层级结构（预算/状态）与区间指标">
+                    <Button size="small" icon={<ReloadOutlined />} loading={hier.loading} onClick={hier.reload} />
+                  </Tooltip>
+                )}
               </Space>
             }
           >
-            <Table<OverviewAccountRow>
-              rowKey="advertiserId"
-              size="small"
-              columns={board.columns}
-              components={board.tableComponents}
-              dataSource={filteredAccounts}
-              pagination={false}
-              scroll={{ x: 1560 }}
-              locale={{
-                emptyText: keywordTrim ? (
-                  <Empty
-                    image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    description={`没有匹配「${keyword.trim()}」的账户`}
+            {detailLevel === 'account' ? (
+              <Table<OverviewAccountRow>
+                rowKey="advertiserId"
+                size="small"
+                columns={board.columns}
+                components={board.tableComponents}
+                dataSource={filteredAccounts}
+                pagination={false}
+                scroll={{ x: 1560 }}
+                locale={{
+                  emptyText: keywordTrim ? (
+                    <Empty
+                      image={Empty.PRESENTED_IMAGE_SIMPLE}
+                      description={`没有匹配「${keyword.trim()}」的账户`}
+                    />
+                  ) : (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有账户数据" />
+                  ),
+                }}
+                footer={() => (
+                  <span style={{ fontSize: 12, color: '#888780' }}>
+                    数据获取时间：{dayjs(cache?.savedAt ?? result.fetchedAt).format('YYYY-MM-DD HH:mm:ss')}
+                    {keywordTrim && ` · 顶部汇总为筛选后 ${filteredAccounts.length} 个账户的合计`}
+                  </span>
+                )}
+              />
+            ) : (
+              <>
+                {hierRangeClamped && (
+                  <Typography.Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 6 }}>
+                    层级报表平台只开近 7 天，指标已按 {hierStart} ~ {hierEnd} 统计（上方账户合计仍按所选区间）。
+                  </Typography.Text>
+                )}
+                {hier.loading && (
+                  <Typography.Text style={{ fontSize: 12, display: 'block', marginBottom: 6, color: '#534AB7' }}>
+                    正在拉取 {hier.progress.done}/{hier.progress.total} 个账户的
+                    {detailLevel === 'unit' ? '广告组' : '创意'}数据…（首次较慢，之后走本地缓存）
+                  </Typography.Text>
+                )}
+                {hier.failures.length > 0 && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 8 }}
+                    message={`${hier.failures.length} 个账户的层级数据没拉到`}
+                    description={
+                      <span style={{ fontSize: 12 }}>
+                        {hier.failures
+                          .slice(0, 3)
+                          .map((f) => `${f.advertiserId}：${f.message}`)
+                          .join('；')}
+                        {hier.failures.length > 3 ? ` 等 ${hier.failures.length} 个` : ''}
+                        （其余账户的数据不受影响，可点右上角刷新重试）
+                      </span>
+                    }
                   />
-                ) : (
-                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有账户数据" />
-                ),
-              }}
-              footer={() => (
-                <span style={{ fontSize: 12, color: '#888780' }}>
-                  数据获取时间：{dayjs(cache?.savedAt ?? result.fetchedAt).format('YYYY-MM-DD HH:mm:ss')}
-                  {keywordTrim && ` · 顶部汇总为筛选后 ${filteredAccounts.length} 个账户的合计`}
-                </span>
-              )}
-            />
+                )}
+                {hierEmptyAccounts.length > 0 && (
+                  <Typography.Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 6 }}>
+                    {hierEmptyAccounts.length} 个账户没有返回{detailLevel === 'unit' ? '广告组' : '创意'}列表：
+                    {hierEmptyAccounts
+                      .slice(0, 3)
+                      .map((a) => a.accountName ?? a.advertiserId)
+                      .join('、')}
+                    {hierEmptyAccounts.length > 3 ? ' 等' : ''}
+                    （全自动投放账户的结构由平台托管，接口不下发层级列表，只能看账户级数据）
+                  </Typography.Text>
+                )}
+                <Table<HierRow>
+                  rowKey={(r) => `${r.advertiserId}-${r.creativeId ?? r.unitId}`}
+                  size="small"
+                  columns={detailLevel === 'unit' ? unitBoard.columns : creativeBoard.columns}
+                  components={detailLevel === 'unit' ? unitBoard.tableComponents : creativeBoard.tableComponents}
+                  dataSource={hierRows}
+                  loading={hier.loading && hier.rows.length === 0}
+                  pagination={{ pageSize: 50, showSizeChanger: false, showTotal: (t) => `共 ${t} 条` }}
+                  scroll={{ x: detailLevel === 'unit' ? 1760 : 1640 }}
+                  locale={{
+                    emptyText: hier.loading ? (
+                      <span style={{ fontSize: 12 }}>正在拉取层级数据…</span>
+                    ) : (
+                      <Empty
+                        image={Empty.PRESENTED_IMAGE_SIMPLE}
+                        description={
+                          keywordTrim
+                            ? `没有匹配「${keyword.trim()}」的${detailLevel === 'unit' ? '广告组' : '创意'}`
+                            : `所选账户下没有${detailLevel === 'unit' ? '广告组' : '创意'}数据`
+                        }
+                      />
+                    ),
+                  }}
+                  footer={() => (
+                    <span style={{ fontSize: 12, color: '#888780' }}>
+                      数据获取时间：
+                      {hier.savedAt ? dayjs(hier.savedAt).format('YYYY-MM-DD HH:mm:ss') : '—'}
+                      {keywordTrim && ` · 已按关键字筛出 ${hierRows.length} 条`}
+                      {hier.rows.length > 0 && !hier.loading && ' · 结构数据 5 分钟内复用，指标按区间重新拉取'}
+                    </span>
+                  )}
+                />
+              </>
+            )}
           </Card>
         </>
       )}
