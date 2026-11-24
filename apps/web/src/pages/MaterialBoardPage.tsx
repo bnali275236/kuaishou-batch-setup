@@ -97,6 +97,53 @@ function writeMaterialCache(slot: 'history' | 'today', key: string, data: Materi
   }
 }
 
+/* ------------------------------------------------------------------
+ * 面板级持久缓存：素材库列表 / 创意属性 / 人群包效果。
+ * 同一取数条件（key）的结果存一份，重进页面直接秒开；
+ * 只有条件变化或用户点「刷新 / 同步」才真正请求。
+ * ------------------------------------------------------------------ */
+const PANEL_CACHE_KEY = 'wkbd_panel_cache_v1';
+
+interface PanelCacheEntry {
+  key: string;
+  data: unknown;
+  savedAt: string;
+}
+
+function readPanelCache(panel: string): PanelCacheEntry | null {
+  try {
+    const raw = localStorage.getItem(PANEL_CACHE_KEY);
+    const map = raw ? (JSON.parse(raw) as Record<string, PanelCacheEntry>) : {};
+    return map[panel] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function writePanelCache(panel: string, key: string, data: unknown): void {
+  try {
+    const raw = localStorage.getItem(PANEL_CACHE_KEY);
+    const map = raw ? (JSON.parse(raw) as Record<string, PanelCacheEntry>) : {};
+    map[panel] = { key, data, savedAt: new Date().toISOString() };
+    localStorage.setItem(PANEL_CACHE_KEY, JSON.stringify(map));
+  } catch {
+    /* 存储超限就丢弃缓存，功能不受影响 */
+  }
+}
+
+/** /api/report/meta 模块级缓存：极轻接口，但两个面板每次挂载都会调，进程内缓存即可 */
+let REPORT_META_CACHE: number | null = null;
+async function fetchLookbackDays(): Promise<number> {
+  if (REPORT_META_CACHE != null) return REPORT_META_CACHE;
+  try {
+    const m = await api.get<{ realtimeLookbackDays: number }>('/api/report/meta');
+    REPORT_META_CACHE = Math.max(m.realtimeLookbackDays, 1);
+  } catch {
+    REPORT_META_CACHE = 7;
+  }
+  return REPORT_META_CACHE;
+}
+
 interface StorageMeta {
   rows: number;
   materialCount: number;
@@ -747,11 +794,41 @@ function MaterialLibraryPanel({ accounts }: { accounts: AccountSummary[] }) {
   const current = accounts.find((a) => a.advertiserId === advertiserId);
   const writable = Boolean(current && !current.readOnly);
 
-  const listQuery = useQuery<AssetItem[]>({
-    queryKey: ['material-library', advertiserId],
-    queryFn: () => api.get<AssetItem[]>(`/api/plan/assets/videos?advertiserId=${advertiserId}`),
-    enabled: Boolean(advertiserId),
-  });
+  /* 素材库列表：持久缓存优先（重进页面秒开），「刷新 / 同步素材 / 上传后」才真正请求 */
+  const [items, setItems] = useState<AssetItem[]>([]);
+  const [itemsSavedAt, setItemsSavedAt] = useState<string | null>(null);
+  const [itemsLoading, setItemsLoading] = useState(false);
+  const libPanel = `library:${advertiserId}`;
+  const loadLibrary = useCallback(
+    async (force: boolean) => {
+      if (!advertiserId) return;
+      if (!force) {
+        const c = readPanelCache(libPanel);
+        if (c) {
+          setItems((c.data as AssetItem[]) ?? []);
+          setItemsSavedAt(c.savedAt);
+          return;
+        }
+      }
+      setItemsLoading(true);
+      try {
+        const r = await api.get<AssetItem[]>(`/api/plan/assets/videos?advertiserId=${advertiserId}`);
+        setItems(r);
+        writePanelCache(libPanel, advertiserId, r);
+        setItemsSavedAt(new Date().toISOString());
+      } catch (err) {
+        modal.error({ title: '素材库读取失败', content: explainError(err) });
+      } finally {
+        setItemsLoading(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [advertiserId],
+  );
+  // 换账户 / 进页面：有缓存直接展示；没有缓存（首次）自动拉一次
+  useEffect(() => {
+    if (advertiserId) void loadLibrary(false);
+  }, [advertiserId, loadLibrary]);
 
   const [syncing, setSyncing] = useState(false);
   const syncVideos = async () => {
@@ -760,6 +837,7 @@ function MaterialLibraryPanel({ accounts }: { accounts: AccountSummary[] }) {
     try {
       await api.get<AssetItem[]>(`/api/plan/assets/videos?advertiserId=${advertiserId}&force=1`);
       message.success('已从平台同步最新素材库');
+      void loadLibrary(true);
     } catch (err) {
       modal.error({ title: '同步素材失败', content: explainError(err) });
     } finally {
@@ -803,7 +881,7 @@ function MaterialLibraryPanel({ accounts }: { accounts: AccountSummary[] }) {
       message.success(
         `「${name}」已上传到账户素材库${pushToProfile ? '，并同步到快手主页' : '（未同步主页）'}`,
       );
-      void listQuery.refetch();
+      void loadLibrary(true);
       setPreviewId(res.photoId);
     } catch (err) {
       modal.error({ title: '上传失败', content: explainError(err) });
@@ -847,8 +925,8 @@ function MaterialLibraryPanel({ accounts }: { accounts: AccountSummary[] }) {
   const [pageSize, setPageSize] = useState(30);
   const [previewId, setPreviewId] = useState<string | null>(null);
   const previewItem = useMemo(
-    () => (listQuery.data ?? []).find((v) => v.id === previewId) ?? null,
-    [listQuery.data, previewId],
+    () => items.find((v) => v.id === previewId) ?? null,
+    [items, previewId],
   );
 
   useEffect(() => {
@@ -858,14 +936,14 @@ function MaterialLibraryPanel({ accounts }: { accounts: AccountSummary[] }) {
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
     const num = (x: number | undefined) => (x === undefined ? -1 : x);
-    return (listQuery.data ?? [])
+    return items
       .filter((v) => !kw || v.name.toLowerCase().includes(kw) || v.id.includes(kw))
       .sort((a, b) =>
         sortBy === 'uploadTime'
           ? (b.uploadTime ?? '').localeCompare(a.uploadTime ?? '')
           : num(b[sortBy]) - num(a[sortBy]),
       );
-  }, [listQuery.data, keyword, sortBy]);
+  }, [items, keyword, sortBy]);
 
   const pageItems = filtered.slice((page - 1) * pageSize, page * pageSize);
   /** 封面加载失败表：key = photoId，用于把破图占位成「无封面」 */
@@ -929,7 +1007,7 @@ function MaterialLibraryPanel({ accounts }: { accounts: AccountSummary[] }) {
         <Button icon={<SyncOutlined />} loading={syncing} disabled={!advertiserId} onClick={() => void syncVideos()}>
           同步素材
         </Button>
-        <Button icon={<ReloadOutlined />} loading={listQuery.isFetching} disabled={!advertiserId} onClick={() => void listQuery.refetch()}>
+        <Button icon={<ReloadOutlined />} loading={itemsLoading} disabled={!advertiserId} onClick={() => void loadLibrary(true)}>
           刷新
         </Button>
         <Input
@@ -962,18 +1040,19 @@ function MaterialLibraryPanel({ accounts }: { accounts: AccountSummary[] }) {
       )}
 
       <Typography.Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 8 }}>
-        这里是账户素材库（平台实时列表），共 {filtered.length} 个素材；消耗为素材维度实时口径，平台仅开放近 7 天。
+        这里是账户素材库，共 {filtered.length} 个素材；消耗为素材维度实时口径，平台仅开放近 7 天。
+        {itemsSavedAt && <> 列表缓存于 {dayjs(itemsSavedAt).format('HH:mm:ss')}，点「刷新 / 同步素材」更新。</>}
         上传后即可在「上计划 → 选择素材」里直接勾选使用。
       </Typography.Text>
 
-      {listQuery.isLoading ? (
+      {itemsLoading && items.length === 0 ? (
         <div style={{ textAlign: 'center', padding: 40 }}>
           <Spin />
         </div>
       ) : filtered.length === 0 ? (
         <Empty
           description={
-            (listQuery.data ?? []).length === 0
+            items.length === 0
               ? '该账户素材库为空，先点「同步素材」从平台拉取，或直接「上传本地视频」'
               : '没有符合搜索条件的素材'
           }
@@ -1136,10 +1215,7 @@ function CreativeAttrsPanel({ accounts }: { accounts: AccountSummary[] }) {
   /** 实时报表仅近 7 天，日期钳制在窗口内 */
   const [lookback, setLookback] = useState(7);
   useEffect(() => {
-    api
-      .get<{ realtimeLookbackDays: number }>('/api/report/meta')
-      .then((m) => setLookback(Math.max(m.realtimeLookbackDays, 1)))
-      .catch(() => setLookback(7));
+    void fetchLookbackDays().then(setLookback);
   }, []);
   const [range, setRange] = useState<[Dayjs, Dayjs]>(() => [
     dayjs().subtract(6, 'day'),
@@ -1174,6 +1250,11 @@ function CreativeAttrsPanel({ accounts }: { accounts: AccountSummary[] }) {
         });
         const r = await api.get<AttrRankResult>(`/api/report/creative-attrs?${qs.toString()}`);
         setResult(r);
+        writePanelCache(
+          'attrs',
+          `${advertiserIds.join(',')}|${groupBy}|${range[0].format('YYYY-MM-DD')}|${range[1].format('YYYY-MM-DD')}`,
+          r,
+        );
         loadedRef.current = `${advertiserIds.join(',')}|${groupBy}|${range[0].format('YYYY-MM-DD')}|${range[1].format('YYYY-MM-DD')}`;
         if (sync && r.synced?.count > 0) message.success(`已同步 ${r.synced.count} 条创意属性`);
       } catch (err) {
@@ -1187,10 +1268,16 @@ function CreativeAttrsPanel({ accounts }: { accounts: AccountSummary[] }) {
     [advertiserIds, groupBy, range],
   );
 
-  // 首次进入 / 条件变化自动加载一次
+  // 首次进入 / 条件变化自动加载一次；取数条件没变且有缓存时直接秒开，不重新请求
   const condKey = advertiserIds.length > 0 ? `${advertiserIds.join(',')}|${groupBy}|${range[0].format('YYYY-MM-DD')}|${range[1].format('YYYY-MM-DD')}` : '';
   useEffect(() => {
     if (!condKey || loadedRef.current === condKey) return;
+    const cached = readPanelCache('attrs');
+    if (cached && cached.key === condKey) {
+      setResult(cached.data as AttrRankResult);
+      loadedRef.current = condKey;
+      return;
+    }
     loadedRef.current = condKey;
     void load(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1375,23 +1462,26 @@ function CreativeAttrsPanel({ accounts }: { accounts: AccountSummary[] }) {
 }
 
 /* ------------------------------------------------------------------
- * 人群包面板：各账户 dmp/population/list 汇总展示。
- * 人群包是账户级资产 —— 同一个包在 N 个账户下各有一份授权，
- * 这里按人群包 ID 去重合并，并标记它出现在哪些账户下（建计划选定向时参考）。
+ * 人群包效果追溯面板：把创意报表按「所属组的人群包定向」归因聚合，
+ * 回答「哪个人群包带来的量 / 成本怎么样 / 哪些包还没用上」。
+ * 数据链路 = 创意级实时报表(带 unitId) × 组列表 population 定向 × dmp 包列表。
+ * 同组挂多个包 → 各包分别计入；组未挂包 → 「未定向（通投）」桶。
  * ------------------------------------------------------------------ */
 
-interface PopRow {
+interface PopEffectRow {
   id: string;
   name: string;
-  /** 包内人数（record_size，标签包退 cover_num） */
-  recordSize: number;
-  status: number;
-  usable: boolean;
   coverWan: number;
-  /** 平台侧校验/创建时间（有值才显示） */
-  verifiedAt: string | null;
-  /** 归属账户显示名列表 */
+  usable: boolean;
   owners: string[];
+  units: number;
+  charge: number;
+  show: number;
+  bclick: number;
+  activation: number;
+  actCost: number | null;
+  payCount: number;
+  payCost: number | null;
 }
 
 function PopulationPanel({ accounts }: { accounts: AccountSummary[] }) {
@@ -1404,129 +1494,168 @@ function PopulationPanel({ accounts }: { accounts: AccountSummary[] }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accounts]);
 
-  const [rows, setRows] = useState<PopRow[] | null>(null);
+  /** 实时报表仅近 7 天，日期钳制在窗口内 */
+  const [lookback, setLookback] = useState(7);
+  useEffect(() => {
+    void fetchLookbackDays().then(setLookback);
+  }, []);
+  const [range, setRange] = useState<[Dayjs, Dayjs]>(() => [dayjs().subtract(6, 'day'), dayjs()]);
+
+  const clampDate = (d: Dayjs) => {
+    const min = dayjs().subtract(lookback - 1, 'day');
+    if (d.isBefore(min, 'day')) return min;
+    if (d.isAfter(dayjs(), 'day')) return dayjs();
+    return d;
+  };
+
+  const [rows, setRows] = useState<PopEffectRow[] | null>(null);
   const [loading, setLoading] = useState(false);
   const loadedRef = useRef<string | null>(null);
 
-  const nameOf = useCallback(
-    (id: string) => {
-      const a = accounts.find((x) => x.advertiserId === id);
-      return a?.accountName ? `${a.accountName}（${id}）` : id;
-    },
-    [accounts],
-  );
-
   const load = useCallback(
-    async (force = false) => {
+    async () => {
       if (advertiserIds.length === 0) return;
       setLoading(true);
-      const key = `${advertiserIds.join(',')}|${force ? 'f1' : 'f0'}`;
+      const key = `${advertiserIds.join(',')}|${range[0].format('YYYY-MM-DD')}|${range[1].format('YYYY-MM-DD')}`;
       try {
-        const lists = await Promise.all(
-          advertiserIds.map(async (id) => {
-            try {
-              return await api.get<Array<Record<string, unknown>>>(
-                `/api/plan/assets/populations?advertiserId=${encodeURIComponent(id)}${force ? '&force=1' : ''}`,
-              );
-            } catch {
-              return [] as Array<Record<string, unknown>>;
-            }
-          }),
-        );
-        // 按 ID 合并，同一包出现在多个账户时汇总归属
-        const merged = new Map<string, PopRow>();
-        lists.forEach((list, idx) => {
-          const accId = advertiserIds[idx];
-          for (const it of list ?? []) {
-            const id = String(it.id ?? '');
-            if (!id) continue;
-            const prev = merged.get(id);
-            if (prev) {
-              if (!prev.owners.includes(nameOf(accId))) prev.owners.push(nameOf(accId));
-              continue;
-            }
-            merged.set(id, {
-              id,
-              name: String(it.name ?? id),
-              recordSize: Number(it.recordSize ?? 0),
-              status: Number(it.status ?? 0),
-              usable: Boolean(it.usable),
-              coverWan: Number(it.coverWan ?? 0),
-              verifiedAt: (it.raw as Record<string, unknown> | undefined)?.verify_time
-                ? String((it.raw as Record<string, unknown>).verify_time)
-                : null,
-              owners: [nameOf(accId)],
-            });
-          }
+        const qs = new URLSearchParams({
+          advertiserIds: advertiserIds.join(','),
+          startDate: range[0].format('YYYY-MM-DD'),
+          endDate: range[1].format('YYYY-MM-DD'),
         });
-        const out = [...merged.values()].sort((a, b) => b.recordSize - a.recordSize);
-        setRows(out);
+        const r = await api.get<{ rows: PopEffectRow[] }>(`/api/report/population-effects?${qs.toString()}`);
+        setRows(r.rows ?? []);
+        writePanelCache('pops', key, r.rows ?? []);
         loadedRef.current = key;
       } catch (err) {
-        modal.error({ title: '人群包读取失败', content: explainError(err) });
+        modal.error({ title: '人群包效果追溯失败', content: explainError(err) });
       } finally {
         setLoading(false);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [advertiserIds, nameOf],
+    [advertiserIds, range],
   );
 
-  const condKey = advertiserIds.length > 0 ? advertiserIds.join(',') : '';
+  const condKey = advertiserIds.length > 0 ? `${advertiserIds.join(',')}|${range[0].format('YYYY-MM-DD')}|${range[1].format('YYYY-MM-DD')}` : '';
   useEffect(() => {
     if (!condKey || loadedRef.current === condKey) return;
+    const cached = readPanelCache('pops');
+    if (cached && cached.key === condKey) {
+      setRows((cached.data as PopEffectRow[]) ?? []);
+      loadedRef.current = condKey;
+      return;
+    }
     loadedRef.current = condKey;
-    void load(false);
+    void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [condKey]);
 
-  const popColumns: ColumnsType<PopRow> = [
+  const popColumns: ColumnsType<PopEffectRow> = [
     {
-      title: '人群包名称',
+      title: '人群包',
       dataIndex: 'name',
-      width: 340,
-      render: (v: string) => (
+      width: 260,
+      render: (v: string, r: PopEffectRow) => (
         <div style={{ fontSize: 13, wordBreak: 'break-all', maxHeight: 66, overflow: 'hidden' }} title={v}>
           {v}
+          {r.id === '__none__' ? null : (
+            <Typography.Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+              ID: {r.id}
+            </Typography.Text>
+          )}
         </div>
       ),
     },
     {
-      title: '人群包 ID',
-      dataIndex: 'id',
-      width: 130,
-      render: (v: string) => <Typography.Text copyable={{ text: v }} style={{ fontSize: 12 }}>{v}</Typography.Text>,
-    },
-    {
       title: (
-        <Tooltip title="包内人数：上传/推送包取 record_size，标签包退 cover_num">
+        <Tooltip title="包内人数（万），来自 dmp 包列表">
           <span>规模(万)</span>
         </Tooltip>
       ),
       dataIndex: 'coverWan',
       align: 'right',
-      width: 110,
-      sorter: (a, b) => a.recordSize - b.recordSize,
-      defaultSortOrder: 'descend',
-      render: (v: number) => fmtInt(v),
+      width: 100,
+      sorter: (a, b) => a.coverWan - b.coverWan,
+      render: (v: number) => (v > 0 ? fmtInt(v) : '—'),
     },
     {
-      title: '状态',
-      dataIndex: 'usable',
-      align: 'center',
+      title: '关联组数',
+      dataIndex: 'units',
+      align: 'right',
       width: 90,
-      filters: [
-        { text: '可用', value: 'usable' },
-        { text: '不可用', value: 'unusable' },
-      ],
-      onFilter: (v, r) => (v === 'usable' ? r.usable : !r.usable),
-      render: (_: unknown, r: PopRow) =>
-        r.usable ? <Tag color="green">可用</Tag> : <Tag color="default">不可用</Tag>,
+      sorter: (a, b) => a.units - b.units,
+      render: (v: number) => (v > 0 ? fmtInt(v) : '—'),
+    },
+    {
+      title: '消耗(元)',
+      dataIndex: 'charge',
+      align: 'right',
+      width: 110,
+      sorter: (a, b) => a.charge - b.charge,
+      defaultSortOrder: 'descend',
+      render: (v: number) => <b>{fmtMoney(v)}</b>,
+    },
+    {
+      title: '展示数',
+      dataIndex: 'show',
+      align: 'right',
+      width: 100,
+      sorter: (a, b) => a.show - b.show,
+      render: (v: number) => (v > 0 ? fmtInt(v) : '—'),
+    },
+    {
+      title: '行为数',
+      dataIndex: 'bclick',
+      align: 'right',
+      width: 100,
+      sorter: (a, b) => a.bclick - b.bclick,
+      render: (v: number) => (v > 0 ? fmtInt(v) : '—'),
+    },
+    {
+      title: '激活数',
+      dataIndex: 'activation',
+      align: 'right',
+      width: 90,
+      sorter: (a, b) => a.activation - b.activation,
+      render: (v: number) => (v > 0 ? fmtInt(v) : '—'),
+    },
+    {
+      title: (
+        <Tooltip title="激活成本 = 消耗 ÷ 激活数">
+          <span>激活成本(元)</span>
+        </Tooltip>
+      ),
+      dataIndex: 'actCost',
+      align: 'right',
+      width: 110,
+      sorter: (a, b) => (a.actCost ?? 1e9) - (b.actCost ?? 1e9),
+      render: (v: number | null) => (v != null ? fmtMoney(v) : '—'),
+    },
+    {
+      title: '付费次数',
+      dataIndex: 'payCount',
+      align: 'right',
+      width: 90,
+      sorter: (a, b) => a.payCount - b.payCount,
+      render: (v: number) => (v > 0 ? fmtInt(v) : '—'),
+    },
+    {
+      title: (
+        <Tooltip title="付费成本 = 消耗 ÷ 付费次数">
+          <span>付费成本(元)</span>
+        </Tooltip>
+      ),
+      dataIndex: 'payCost',
+      align: 'right',
+      width: 110,
+      sorter: (a, b) => (a.payCost ?? 1e9) - (b.payCost ?? 1e9),
+      render: (v: number | null) => (v != null ? fmtMoney(v) : '—'),
     },
     {
       title: '归属账户',
       dataIndex: 'owners',
-      width: 220,
+      width: 200,
       render: (v: string[]) =>
         v.length <= 2 ? (
           <span style={{ fontSize: 12 }}>{v.join('、')}</span>
@@ -1537,10 +1666,12 @@ function PopulationPanel({ accounts }: { accounts: AccountSummary[] }) {
         ),
     },
     {
-      title: '平台校验时间',
-      dataIndex: 'verifiedAt',
-      width: 160,
-      render: (v: string | null) => <span style={{ fontSize: 12, color: '#888780' }}>{v ?? '—'}</span>,
+      title: '状态',
+      dataIndex: 'usable',
+      align: 'center',
+      width: 80,
+      render: (_: unknown, r: PopEffectRow) =>
+        r.id === '__none__' ? null : r.usable ? <Tag color="green">可用</Tag> : <Tag color="default">不可用</Tag>,
     },
   ];
 
@@ -1568,21 +1699,29 @@ function PopulationPanel({ accounts }: { accounts: AccountSummary[] }) {
           options={accountOptions}
           disabled={accounts.length === 0}
         />
-        <Button
-          icon={<SyncOutlined />}
-          loading={loading}
-          disabled={advertiserIds.length === 0}
-          title="绕开 10 分钟缓存，直接从平台重拉人群包"
-          onClick={() => void load(true)}
-        >
-          强制刷新
+        <DatePicker.RangePicker
+          value={[clampDate(range[0]), clampDate(range[1])]}
+          allowClear={false}
+          disabledDate={(d) => {
+            const min = dayjs().subtract(lookback - 1, 'day');
+            return d.isAfter(dayjs(), 'day') || d.isBefore(min, 'day');
+          }}
+          onChange={(v) => {
+            if (v?.[0] && v?.[1]) {
+              loadedRef.current = null;
+              setRange([clampDate(v[0]), clampDate(v[1])]);
+            }
+          }}
+        />
+        <Button icon={<ReloadOutlined />} loading={loading} disabled={advertiserIds.length === 0} onClick={() => void load()}>
+          刷新
         </Button>
       </div>
 
       <Typography.Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 8 }}>
-        账户人群包资产汇总（平台 dmp/population/list，本地缓存 10 分钟）。
-        当前范围：{advertiserIds.length === 0 ? '未选账户' : advertiserIds.length === accounts.length ? `全部 ${advertiserIds.length} 个账户` : `${advertiserIds.length} 个账户`}。
-        同名包在多个账户各有一份授权 → 已按 ID 合并并在「归属账户」里标记，建计划选定向时直接复制 ID 使用。
+        人群包效果追溯（实时口径，平台仅开放近 7 天）：把每个创意的消耗/激活/付费归因到它所属广告组挂的人群包。
+        组挂多个包时各包分别计入（包维度赛马）；组没挂包归入「未定向（通投）」；没投出量的包也列出（消耗 0），
+        顺带看出「哪些包还没用上」。定向以平台组列表实时回读为准。
       </Typography.Text>
 
       {advertiserIds.length === 0 ? (
@@ -1592,17 +1731,18 @@ function PopulationPanel({ accounts }: { accounts: AccountSummary[] }) {
           <Spin />
         </div>
       ) : !rows || rows.length === 0 ? (
-        <Empty description="所选账户下没有人群包（可在磁力引擎 DMP 或本工作台建计划流程里创建）" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ padding: 32 }} />
+        <Empty description="所选账户区间内没有人群包投放数据" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ padding: 32 }} />
       ) : (
-        <Table<PopRow>
+        <Table<PopEffectRow>
           rowKey={(r) => r.id}
           size="small"
           columns={popColumns}
           dataSource={rows}
-          pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 个` }}
+          pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
           footer={() => (
             <span style={{ fontSize: 12, color: '#888780' }}>
-              可用 {rows.filter((r) => r.usable).length} / {rows.length} 个 · 数据时间：{dayjs().format('YYYY-MM-DD HH:mm:ss')}
+              合计消耗 {fmtMoney(rows.reduce((s, r) => s + r.charge, 0))} 元 · 合计激活 {fmtInt(rows.reduce((s, r) => s + r.activation, 0))} · 数据时间：
+              {dayjs().format('YYYY-MM-DD HH:mm:ss')}（平台实时）
             </span>
           )}
         />
@@ -1633,14 +1773,17 @@ export default function MaterialBoardPage() {
     }
   };
 
+  // 轻量接口：5 分钟内重进页面不再重新请求（过期后后台刷新，旧数据先展示）
   const { data: accounts } = useQuery<AccountSummary[]>({
     queryKey: ['material-accounts'],
     queryFn: () => api.get<AccountSummary[]>('/api/oauth/accounts'),
+    staleTime: 5 * 60_000,
   });
 
   const { data: storage, refetch: refetchStorage } = useQuery<StorageMeta>({
     queryKey: ['material-meta'],
     queryFn: () => api.get<StorageMeta>('/api/material/meta'),
+    staleTime: 5 * 60_000,
   });
 
   const usable = useMemo(
@@ -1874,7 +2017,7 @@ export default function MaterialBoardPage() {
               ? '账户素材库管理：浏览平台素材、上传本地视频到账户素材库。上传的素材可直接在「上计划 → 选择素材」里勾选使用。'
               : view === 'attrs'
                 ? '创意属性赛马（细则 1124）：按标签组合 / 单标签 / 广告语 / 原生广告语 / 创意分类 / 行动号召聚合创意报表，默认汇总全部账户，同名文案跨账户合计，追踪哪句文案、哪组标签跑得好，优选复用。'
-                : '账户人群包列表：查看各账户可用的人群定向包（含规模与可用状态），供建计划选定向时参考。'}
+                : '人群包效果追溯：把每个创意的消耗/激活/付费归因到其广告组挂的人群包，按包赛马对比成本，未投放的包也列出（消耗 0），顺带看出哪些包还没用上。'}
         </p>
       </div>
 

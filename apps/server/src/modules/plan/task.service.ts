@@ -125,8 +125,13 @@ export class TaskService {
     const rows = input.rows ?? [];
     if (rows.length === 0) throw new BadRequestException('没有可提交的行');
 
+    // ⚠️ 只认显式的 RUNNING / PAUSED；其余值回退引擎默认（2026-11-09 起默认 RUNNING）。
+    // 2026-11-24 修复：此前 initialStatus:'PAUSED' 会被这里吞成默认 RUNNING，
+    // 导致「建完暂停待人工确认」的矩阵搭建任务 4 个计划全部直接投放（已手动压停）。
     const initialStatus: InitialStatus =
-      input.initialStatus === 'RUNNING' ? 'RUNNING' : DEFAULT_INITIAL_STATUS;
+      input.initialStatus === 'RUNNING' || input.initialStatus === 'PAUSED'
+        ? input.initialStatus
+        : DEFAULT_INITIAL_STATUS;
     const putStatus = PUT_STATUS_CODE.RUNNING;
     // 组/创意创建时一律默认开启。「创建后暂停」只作用于计划层：
     // 计划创建成功后立即单独置暂停——计划暂停时其下组/创意不可能消耗。
@@ -251,6 +256,11 @@ export class TaskService {
         displayName: row.campaignName,
         parentIndex: null,
       });
+
+      // 全自动投放（auto_manage）：官方 auto_build=1 由平台自动搭建组/创意，
+      // 本地只建计划层 —— 不展开 UNIT/CREATIVE 条目（历史 UAX 任务均如此，
+      // 手动再建组会与平台自动基建冲突）。
+      if (row.autoManage === 1) return;
 
       const padCreative = (n: number) => String(n).padStart(2, '0');
       const padUnit = (n: number) => String(n).padStart(2, '0');
@@ -1205,6 +1215,7 @@ export class TaskService {
 
   /** 一行展开成几个广告组：units 模型 = units 数组长度；旧模型 = unitsPerCampaign（防呆收敛到 1~50） */
   private unitsPerRow(row: PlanRow): number {
+    if (row.autoManage === 1) return 0; // 全自动投放：平台自动建组，本地配额计数不计组
     if (row.units && row.units.length > 0) return row.units.length;
     return Math.min(Math.max(Math.trunc(row.unitsPerCampaign ?? 1) || 1, 1), 50);
   }

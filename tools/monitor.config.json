@@ -4,7 +4,9 @@
       "id": "130483618",
       "tag": "618",
       "shortName": "盼之电竞",
-      "note": "shortName 用于卡片标题与账户块（短显示名）；平台完整账户名由 /api/oauth/accounts 回读，仅作追溯，不进卡片"
+      "note": "shortName 用于卡片标题与账户块（短显示名）；平台完整账户名由 /api/oauth/accounts 回读，仅作追溯，不进卡片；bidYuan/bidPayYuan=该户 MCB 无出价时的预警基准（618 不动，维持 15/150）；有 oCPX 组的账户会被平台实回出价自动覆盖",
+      "bidYuan": 15,
+      "bidPayYuan": 150
     }
   ],
   "api": "http://127.0.0.1:7801",
@@ -21,26 +23,28 @@
     "advertiserId": "130483618",
     "note": "钉钉表格「盼之电竞信息流投放日报表」，工作表「快手信息流」（按渠道命名，后续接新渠道时新建同名工作表）。daemon 每天 09:35 填昨日（落定值）、23:30 填当日（准实时，次日覆盖更新）。幂等：同日期行覆盖，无则追加"
   },
-  "bidYuan": 15,
-  "bidPayYuan": 150,
+  "bidYuan": 5,
+  "bidPayYuan": 100,
   "totalBudgetYuan": 1000,
   "dailyBudgetYuan": 1000,
   "budgetPlan": {
     "130483618": 1000,
-    "note": "单户（盼之电竞 618）；账户日预算 1000、计划日预算 500。2026-11-24 起无成本考核，按出价预警：激活线 15、付费线 150（细则1124）"
+    "note": "单户（盼之电竞 618）；2026-11-24 出价全面下调（激活 5 / 付费 100），预警基准自动跟随出价"
   },
   "learning": {
     "observeMaxAct": 8,
     "rampMaxAct": 20,
-    "warnX": 1.0,
+    "warnX": 1,
     "redX": 1.3,
     "rampWarnX": 1.5,
-    "rampHardX": 2.0,
+    "rampHardX": 2,
     "rampHardMinChargeX": 3,
     "redMinChargeX": 6,
     "emptyX": 3,
     "accountEmptyX": 4,
-    "note": "阈值全部改为「目标出价 × 倍数」动态计算；目标出价：付费(190)计划取 bidPayYuan、激活计划取 bidYuan，非 MCB 用组实际出价"
+    "note": "阈值全部「出价 × 倍数」动态计算；出价基准永远跟随：每轮巡检自动回读平台组实际出价（非 MCB），回退顺序 平台实回→账户级 bidYuan/bidPayYuan→全局。reuseX/killNoActX=日报复投线/停投线倍数",
+    "reuseX": 0.75,
+    "killNoActX": 1.8
   },
   "thresholds": {
     "clickNoConvCount": 20,
@@ -58,15 +62,6 @@
   },
   "dedupeMinutes": 90,
   "heartbeat": true,
-  "autoExecute": {
-    "enabled": false,
-    "note": "2026-11-23 暂关：618 户最大转化计划处于学习期，K1/K2 用绝对金额（36/54 元）判定，起投首小时容易误杀创意。用户明确恢复自动执行后再置 true",
-    "level": "B",
-    "bidMin": 8,
-    "bidMax": 9,
-    "bidBase": 8,
-    "maxActionsPerHour": 8,
-    "maxKillPerDay": 10,
-    "maxBidPerDay": 12
-  }
+  "ensureRunning": false,
+  "ensureRunningNote": "A8 自动重开已拆除（2026-11-24 事故）：monitor.cjs 不再含任何自动写平台逻辑，ensureRunning/账号范围过滤代码一并停用"
 }

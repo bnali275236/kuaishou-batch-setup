@@ -7,21 +7,69 @@
  *   node tools/monitor.cjs --daily    # 09:30 昨日复盘 + 今日基建清单
  *   node tools/monitor.cjs --eod      # 23:30 日终小结
  *
- * 只报警为主；自动执行（关停/调价）按 config.autoExecute 授权档位由 auto-exec.cjs 执行。数据全部取自本地 7801 后端（同源事实）。
+ * 只报警，不做任何自动写操作（老产品「盼之」的自动关停/调价/预算互倒链路已于 2026-11-24 拆除归档）。数据全部取自本地 7801 后端（同源事实）。
  */
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const autoExec = require('./auto-exec.cjs');
-const autoBudget = require('./auto-budget.cjs');
 const { ensureBackend, ensureWatchdog } = require('./ensure-backend.cjs');
-const autoEffects = require('./auto-effects.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const CFG = JSON.parse(fs.readFileSync(path.join(__dirname, 'monitor.config.json'), 'utf-8'));
 const RUNTIME = path.join(ROOT, '.runtime');
 const STATE_FILE = path.join(RUNTIME, 'monitor-state.json');
 const LOG_FILE = path.join(RUNTIME, 'monitor.log');
+
+/* ---------------------------------------------------------------------------
+ * 出价基准：永远跟随出价（2026-11-24 用户拍板「警告阈值永远跟随出价调整」）
+ * 每轮 watch/daily/eod 开跑前自动从平台回读各账户组的实际出价（oCPX 且
+ * cpa_bid>0），按 ocpx_action_type（180 激活 / 190 付费）取出现次数最多的值；
+ * MCB（bid_type 1/12）与 UAX（出价 0）跳过。
+ * 解析顺序：平台实回 → 账户级 bidYuan/bidPayYuan 覆盖 → 全局 CFG.bidYuan/bidPayYuan。
+ * 阈值族全部由 bidsFor() 的结果 × config.learning 倍数动态推出，没有绝对金额。
+ * ------------------------------------------------------------------------- */
+const ACCT_BIDS = new Map(); // accId -> { act, pay }（元）
+function bidsFor(accId) {
+  const acc = (CFG.accounts || []).find((a) => String(a.id) === String(accId)) || {};
+  const sync = ACCT_BIDS.get(String(accId)) || {};
+  return {
+    act: Number(sync.act ?? acc.bidYuan ?? CFG.bidYuan ?? 15),
+    pay: Number(sync.pay ?? acc.bidPayYuan ?? CFG.bidPayYuan ?? 150),
+  };
+}
+async function syncBidsFromPlatform() {
+  for (const acc of CFG.accounts || []) {
+    try {
+      const units = await api('/api/manage/structure', { advertiserId: String(acc.id), level: 'unit' });
+      const groups = { 180: new Map(), 190: new Map() }; // bid(厘) -> 出现次数
+      for (const u of units || []) {
+        const raw = u.raw || {};
+        const bid = Number(raw.cpa_bid || 0);
+        const action = Number(raw.ocpx_action_type || 0);
+        const bt = Number(raw.bid_type || 0);
+        if (bid <= 0 || (action !== 180 && action !== 190) || bt === 1 || bt === 12) continue;
+        groups[action].set(bid, (groups[action].get(bid) || 0) + 1);
+      }
+      const pick = (g) => [...g.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+      const prev = ACCT_BIDS.get(String(acc.id)) || {};
+      const act = pick(groups[180]);
+      const pay = pick(groups[190]);
+      const next = {
+        act: act != null ? act / 1000 : prev.act,
+        pay: pay != null ? pay / 1000 : prev.pay,
+      };
+      const before = bidsFor(acc.id);
+      ACCT_BIDS.set(String(acc.id), next);
+      const after = bidsFor(acc.id);
+      const changed = [];
+      if (after.act !== before.act) changed.push(`激活 ${before.act} → ${after.act} 元`);
+      if (after.pay !== before.pay) changed.push(`付费 ${before.pay} → ${after.pay} 元`);
+      if (changed.length) log(`出价基准自动跟随 ${acc.tag || acc.id}：${changed.join('，')}（按平台组实回出价）`);
+    } catch (e) {
+      log(`出价基准同步失败 ${acc.id}：${e.message}`);
+    }
+  }
+}
 
 if (!fs.existsSync(RUNTIME)) fs.mkdirSync(RUNTIME, { recursive: true });
 
@@ -285,13 +333,14 @@ const T = CFG.thresholds;
 const L = CFG.learning;
 
 /**
- * 目标出价（预警基准）：细则 1124 —— 无成本考核，按出价预警。
- * 付费(ocpx 190) → bidPayYuan(150)，激活 → bidYuan(15)；
- * 非 MCB 计划有实际组出价时优先用组出价（更贴近考核口径）。
+ * 目标出价（预警基准）：细则 1124 —— 无成本考核，按出价预警，基准永远跟随出价。
+ * 非 MCB 计划有实际组出价时优先用组出价；否则用该账户的平台同步出价
+ * （bidsFor：平台实回 → 账户级配置 → 全局配置）。
  */
 function targetBidOf(brief = {}) {
-  const pay = Number(CFG.bidPayYuan || 150);
-  const act = Number(CFG.bidYuan || 15);
+  const bids = brief._bids || {};
+  const pay = Number(bids.pay ?? CFG.bidPayYuan ?? 150);
+  const act = Number(bids.act ?? CFG.bidYuan ?? 15);
   if (!brief.isMcb && Number(brief.bidYuan) > 0) return Number(brief.bidYuan);
   return Number(brief.ocpxActionType) === 190 ? pay : act;
 }
@@ -312,8 +361,9 @@ function costLines(brief = {}) {
 }
 
 /** 账户级空耗线（整户 0 激活判定） */
-function accountEmptyLine(payGoal = false) {
-  const t = payGoal ? Number(CFG.bidPayYuan || 150) : Number(CFG.bidYuan || 15);
+function accountEmptyLine(payGoal = false, bids = null) {
+  const b = bids || { act: Number(CFG.bidYuan || 15), pay: Number(CFG.bidPayYuan || 150) };
+  const t = payGoal ? b.pay : b.act;
   return t * (L.accountEmptyX ?? 4);
 }
 
@@ -393,12 +443,13 @@ function evalAccount(a, budgetYuan, hour, pace, opts = {}) {
     delete state.firstSeen[`A5-${a.id}`];
   }
   // A4 账户级空耗（整户消耗达到空耗线仍 0 激活才算异常；线 = 目标出价 × accountEmptyX）
-  const acctEmpty = accountEmptyLine(!!opts.payGoal);
+  const acctEmpty = accountEmptyLine(!!opts.payGoal, opts.bids);
   if (a.charge >= acctEmpty && a.activation === 0) {
     alerts.push({ key: `A4-${a.id}`, sev: 'RED', code: 'A4', mcb, text: `全户空耗：消耗 ${yuan(a.charge)} 元仍 0 激活` });
   }
   // A3 账户级成本：只做提示，真正的判定在计划级别（账户里混着老计划，不能一刀切）
-  const acctWarn = Number(opts.payGoal ? CFG.bidPayYuan || 150 : CFG.bidYuan || 15);
+  const bids = opts.bids || { act: Number(CFG.bidYuan || 15), pay: Number(CFG.bidPayYuan || 150) };
+  const acctWarn = Number(opts.payGoal ? bids.pay : bids.act);
   if (stageOf(a.activation) !== 'OBSERVE' && a.cpa != null && a.cpa > acctWarn) {
     alerts.push({ key: `A3-${a.id}`, sev: 'YEL', code: 'A3', mcb, text: `账户综合 CPA ${yuan(a.cpa)} ≥ 出价预警线 ${yuan(acctWarn)}（激活 ${a.activation}）——仅提示，成本判定看计划级` });
   }
@@ -406,7 +457,7 @@ function evalAccount(a, budgetYuan, hour, pace, opts = {}) {
   if (hour >= 12) {
     if (a.charge === 0) {
       alerts.push({ key: `A1b-${a.id}`, sev: 'RED', code: 'A1', mcb, text: `全天 0 消耗：计划可能未开启/审核未过/素材被拒` });
-    } else if (a.charge >= CFG.bidYuan * 3 && budgetYuan > 0) {
+    } else if (a.charge >= (opts.bids ? opts.bids.act : CFG.bidYuan) * 3 && budgetYuan > 0) {
       const ratio = a.charge / Math.max(expCharge, 1);
       if (ratio < T.paceLow && !mcb) {
         // 最大转化由系统控速，节奏慢不是异常，也不提任何「加价」——干脆不报
@@ -428,7 +479,7 @@ function evalAccount(a, budgetYuan, hour, pace, opts = {}) {
  * 单户 2500 只是初始切分，不是硬约束；撞线但合计还有额度 → 提示调拨，不报警停投。
  */
 function allocOf(accId) {
-  const plan = { ...(CFG.budgetPlan || {}), ...autoBudget.currentPlan() };
+
   return Number(plan[accId] || CFG.dailyBudgetYuan);
 }
 
@@ -764,6 +815,10 @@ function loadPauseExempt() {
 /** 近 36h 工具建的计划必须投放中；发现暂停的立即重开并告警。
  *  返回告警数组（code A8，RED）。若是用户手动暂停的，回复后加入豁免名单。 */
 async function ensureRunning() {
+  // ⚠️ 只对监控配置里的账户生效（2026-11-24 事故：无范围限定时把 619-622 要求
+  // 暂停的新账户矩阵计划当成「异常暂停」全部自动重开）。cfg.ensureRunning=false 可整体关闭。
+  if (CFG.ensureRunning === false) return [];
+  const watched = new Set((CFG.accounts || []).map((a) => String(a.id)));
   const exempt = loadPauseExempt();
   const { PrismaClient } = require('@prisma/client');
   const DB = path.join(process.env.APPDATA || '', '快手投放工作台', 'app.db');
@@ -779,6 +834,7 @@ async function ensureRunning() {
       select: { advertiserId: true, platformId: true, displayName: true },
       orderBy: { createdAt: 'desc' },
     });
+    items = items.filter((it) => watched.has(String(it.advertiserId)));
   } finally {
     await p.$disconnect();
   }
@@ -857,6 +913,7 @@ function dedupe(alerts) {
 }
 
 async function watch() {
+  await syncBidsFromPlatform(); // 出价基准永远跟随
   const hour = now().getHours();
   // 巡检时段 09:00–23:59，之外静默（定时任务可能全天触发）
   if (hour < 9) { log("巡检时段外，跳过"); return; }
@@ -871,21 +928,6 @@ async function watch() {
   for (const a of CFG.accounts) acctBudget[a.id] = await budgetOf(a.id);
 
   let alerts = [];
-  // 预算动态调拨只在多户时才有意义（单户没有「互倒」这回事，别去动人家预算）
-  if (CFG.accounts.length > 1) {
-    try {
-      const budgetActs = await autoBudget.rebalance(metrics, acctBudget, { hour, dry: DRY });
-      if (budgetActs.length) {
-        for (const a of CFG.accounts) acctBudget[a.id] = await budgetOf(a.id);
-        for (const b of budgetActs) {
-          alerts.push({ key: `AB-${b.tag}`, sev: 'GOOD', code: 'A7', text: `${b.tag} 日预算已调 ${b.from} → ${b.to} 元（${b.why}）` });
-        }
-      }
-    } catch (e) {
-      log(`预算调拨失败：${e.message}`);
-    }
-  }
-
   // 计划层：拉计划清单（本地库 + 今日有消耗）→ 名称/预算/出价方式，再判定成本
   const plans = [];
   const planBudget = {};
@@ -900,6 +942,7 @@ async function watch() {
     }
     // 计划清单：今日报表 + 近 3 天报表（含今天零消耗但仍在投的计划）+ 本地任务库
     const briefs = await loadCampaignBrief(acc.id, [...rows.map((r) => r.campaignId), ...(await recentCampaignIds(acc.id, 3))]);
+    for (const b of briefs.values()) b._bids = bidsFor(acc.id); // 出价基准跟随该账户
     const rowMap = new Map(rows.map((r) => [String(r.campaignId), r]));
 
     // 计划池 = 在投计划日预算之和（账户预算是外层上限，不是今天能花完的钱）
@@ -916,7 +959,7 @@ async function watch() {
       plans.push({
         accId: acc.id,
         row: r,
-        brief: { id: String(r.campaignId), name: `计划${String(r.campaignId).slice(-6)}`, putStatus: 1, putStatusText: '投放中', dayBudgetYuan: 0, bidYuan: 0, bidType: null, isMcb: false },
+        brief: { _bids: bidsFor(acc.id), id: String(r.campaignId), name: `计划${String(r.campaignId).slice(-6)}`, putStatus: 1, putStatusText: '投放中', dayBudgetYuan: 0, bidYuan: 0, bidType: null, isMcb: false },
       });
     }
 
@@ -930,7 +973,7 @@ async function watch() {
     // 账户进度按计划池判定（不是账户预算）
     const m = metrics.find((x) => String(x.id) === String(acc.id));
     const hasMcb = [...briefs.values()].some((b) => b.isMcb && b.putStatus !== 2);
-    if (m) alerts = alerts.concat(evalAccount(m, pool || acctBudget[acc.id] || 0, hour, pace, { mcb: hasMcb }));
+    if (m) alerts = alerts.concat(evalAccount(m, pool || acctBudget[acc.id] || 0, hour, pace, { mcb: hasMcb, bids: bidsFor(acc.id) }));
   }
   // 多户才有合计口径
   alerts = alerts.concat(evalTotal(metrics, acctBudget, hour, pace));
@@ -967,33 +1010,6 @@ async function watch() {
       log(`${accName} 组数据拉取失败（不影响告警）：${e.message}`);
     }
     perAccount.push(pa);
-  }
-
-  // 自动执行（B 档授权：K1/K2 关停 + B1/B2/B3 调价，护栏在 auto-exec 内）
-  try {
-    const done = await autoExec.run({ date, hour, dry: DRY }, perAccount);
-    if (done.length) log(`自动执行 ${done.length} 项`);
-  } catch (e) {
-    log(`自动执行异常（不影响告警）：${e.message}`);
-  }
-
-  // 效果追踪扫描：对已执行动作做 +6h / +24h 回看，有新评估就推卡
-  try {
-    const lines = await autoEffects.sweep();
-    if (lines.length) {
-      const fxCard = [
-        `### 【快手操作效果追踪】${date} ${hm()}`,
-        '',
-        ...lines.slice(0, 12),
-        '',
-        '口径：只摆事实不下结论；样本不足的继续观察（最长追 48h）。',
-      ].join('\n');
-      if (DRY) console.log(fxCard);
-      else pushDingtalk(fxCard);
-      console.log(fxCard);
-    }
-  } catch (e) {
-    log(`效果追踪异常（不影响告警）：${e.message}`);
   }
 
   // 投放状态自查：近 36h 新建计划必须投放中，发现暂停立即重开（A8）
@@ -1046,6 +1062,7 @@ async function watch() {
 }
 
 async function daily() {
+  await syncBidsFromPlatform(); // 出价基准永远跟随
   const today = now();
   const y = new Date(today.getTime() - 86400000);
   const yStr = ymd(y);
@@ -1066,6 +1083,7 @@ async function daily() {
       log(`昨日计划数据拉取失败：${e.message}`);
     }
     const briefs = await loadCampaignBrief(acc.id, [...rows.map((r) => r.campaignId), ...(await recentCampaignIds(acc.id, 7))]);
+    for (const b of briefs.values()) b._bids = bidsFor(acc.id);
     let pool = 0;
     for (const b of briefs.values()) if (b.dayBudgetYuan > 0) pool += b.dayBudgetYuan;
     planBudget[acc.id] = pool;
@@ -1076,7 +1094,7 @@ async function daily() {
       plans.push({
         accId: acc.id,
         row: r,
-        brief: { id: String(r.campaignId), name: `计划${String(r.campaignId).slice(-6)}`, putStatus: 1, putStatusText: '—', dayBudgetYuan: 0, bidYuan: 0, isMcb: false },
+        brief: { _bids: bidsFor(acc.id), id: String(r.campaignId), name: `计划${String(r.campaignId).slice(-6)}`, putStatus: 1, putStatusText: '—', dayBudgetYuan: 0, bidYuan: 0, isMcb: false },
       });
     }
   }
@@ -1107,11 +1125,28 @@ async function daily() {
   }
   mats.sort((a, b) => b.charge - a.charge);
   const top = mats.slice(0, 12);
+  // 复投线 / 停投线 = 激活出价 × 倍数（永远跟随出价，倍数在 config.learning）
+  const bidModeOf = (arr, k, fb) => {
+    const m = new Map();
+    for (const p of arr) {
+      const v = Number(((p.brief || {})._bids || {})[k]);
+      if (v > 0) m.set(v, (m.get(v) || 0) + 1);
+    }
+    const top = [...m.entries()].sort((a, b) => b[1] - a[1])[0];
+    return top ? top[0] : fb;
+  };
+  const actBid0 = bidModeOf(
+    plans.filter((p) => Number((p.brief || {}).ocpxActionType) !== 190),
+    'act',
+    Number(CFG.bidYuan || 5),
+  );
+  const reuseLine = actBid0 * (L.reuseX ?? 0.75);
+  const killLine = actBid0 * (L.killNoActX ?? 1.8);
   const repool = mats
-    .filter((m) => m.activation >= 3 && m.cpa != null && m.cpa <= 11)
+    .filter((m) => m.activation >= 3 && m.cpa != null && m.cpa <= reuseLine)
     .sort((a, b) => b.charge - a.charge)
     .slice(0, 10);
-  const kill = mats.filter((m) => m.charge >= 27 && m.activation === 0).slice(0, 5);
+  const kill = mats.filter((m) => m.charge >= killLine && m.activation === 0).slice(0, 5);
 
   const total = metrics.reduce((s, m) => s + (m.charge || 0), 0);
   const act = metrics.reduce((s, m) => s + (m.activation || 0), 0);
@@ -1128,8 +1163,8 @@ async function daily() {
     );
   const actAgg = sumOf(actLines, 'charge', 'activation');
   const payAgg = sumOf(payLines, 'charge', 'payCount');
-  const actBid = Number(CFG.bidYuan || 15);
-  const payBid = Number(CFG.bidPayYuan || 150);
+  const actBid = bidModeOf(actLines, 'act', Number(CFG.bidYuan || 5));
+  const payBid = bidModeOf(payLines, 'pay', Number(CFG.bidPayYuan || 100));
   const seg = [];
   if (actAgg.cv > 0) {
     const cpa = actAgg.charge / actAgg.cv;
@@ -1175,8 +1210,8 @@ async function daily() {
   } else {
     lines.push('· 近 7 天没有带转化的素材');
   }
-  lines.push(repool.length ? `· ✅ 可复投（CPA ≤ 11）：${repool.slice(0, 5).map((m) => `${m.name}（${yuan(m.cpa)}）`).join('、')}` : '· 暂无达标可复投素材，今天以测新为主');
-  if (kill.length) lines.push(`· ⛔ 建议停投（≥27 元 0 激活）：${kill.map((m) => `${m.name}（${yuan(m.charge)}）`).join('、')}`);
+  lines.push(repool.length ? `· ✅ 可复投（CPA ≤ ${reuseLine.toFixed(1)}）：${repool.slice(0, 5).map((m) => `${m.name}（${yuan(m.cpa)}）`).join('、')}` : '· 暂无达标可复投素材，今天以测新为主');
+  if (kill.length) lines.push(`· ⛔ 建议停投（≥${killLine.toFixed(1)} 元 0 激活）：${kill.map((m) => `${m.name}（${yuan(m.charge)}）`).join('、')}`);
 
   // 今日动作：结合账户是否最大转化
   const mcbAccs = new Set();
@@ -1192,16 +1227,6 @@ async function daily() {
   lines.push(`2. 复投池里的素材各上 1 条新计划（同素材可重复），版位只投上下滑大屏`);
   lines.push(`3. 新素材测 3~5 条，等激活 ≥${L.observeMaxAct} 再看成本，别中途频繁改`);
 
-  // 效果台账：昨日/前日已执行动作的 24h 回看汇总
-  try {
-    const fx = autoEffects.recentLines(2);
-    if (fx.length) {
-      lines.push('', '---', '**近 2 日操作效果回看（24h 窗口，只摆事实）**');
-      fx.slice(0, 8).forEach((l) => lines.push(`· ${l}`));
-    }
-  } catch (e) {
-    log(`效果台账读取失败：${e.message}`);
-  }
   lines.push('', `[打开工作台](http://127.0.0.1:7801)`);
   const dkey = MODE + '-' + ymd();
   if (state.sent[dkey]) { log(dkey + " 今日已推送过，跳过"); return; }
@@ -1215,6 +1240,7 @@ async function daily() {
 }
 
 async function eod() {
+  await syncBidsFromPlatform(); // 出价基准永远跟随
   const date = ymd();
   const metrics = await accountMetrics(date);
   const names = await accountNameMap();
@@ -1232,6 +1258,7 @@ async function eod() {
       log(`日终计划数据拉取失败：${e.message}`);
     }
     const briefs = await loadCampaignBrief(acc.id, [...rows.map((r) => r.campaignId), ...(await recentCampaignIds(acc.id, 7))]);
+    for (const b of briefs.values()) b._bids = bidsFor(acc.id);
     let pool = 0;
     for (const b of briefs.values()) if (b.dayBudgetYuan > 0) pool += b.dayBudgetYuan;
     planBudget[acc.id] = pool;
@@ -1242,7 +1269,7 @@ async function eod() {
       plans.push({
         accId: acc.id,
         row: r,
-        brief: { id: String(r.campaignId), name: `计划${String(r.campaignId).slice(-6)}`, putStatus: 1, putStatusText: '—', dayBudgetYuan: 0, bidYuan: 0, isMcb: false },
+        brief: { _bids: bidsFor(acc.id), id: String(r.campaignId), name: `计划${String(r.campaignId).slice(-6)}`, putStatus: 1, putStatusText: '—', dayBudgetYuan: 0, bidYuan: 0, isMcb: false },
       });
     }
   }

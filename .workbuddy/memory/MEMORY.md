@@ -77,3 +77,9 @@ vite emptyOutDir 关掉、由 stage.js `pruneUnreferencedAssets()` 清（须扫�
 **状态查询必须用 `POST /api/manage/structure/by-ids`**：平台 campaign/list 全量列表在 UAX 账户下不返回常规计划（386 全量 372 条全是 UAX），全量列表查状态等于盲查。巡检 tools/monitor.cjs 的 ensureRunning()（A8）每小时核验近 36h 计划、发现暂停立即重开并告警，豁免名单 `.runtime/pause-exempt.json`。
 自动执行器 tools/auto-exec.cjs（B档已授权)：K1≥36元0激活 / K2≥54元CPA≥18 关停，B1/B2/B3 出价区间 [8,10]；UNIT payload 的 cpa_bid 单位是厘。效果台账 tools/auto-effects.cjs：动作前后快照 + 6h/24h 宽松回看。
 平台枚举坑：unit payload 的 `package_id` 是**数字包 ID**（1099685944711），不是包名 com.pzds.pzds。
+
+## MCB/稳投/人群包 平台硬约束（2026-11-24 实测）
+- MCB 计划：**计划层 bid_type=1 + 组层 bid_type=12**，缺计划层声明报「非MCB计划不能创建MCB广告组」；搜索广告同样适用。
+- 周期稳投必须挂全自动投放（auto_manage=1）；**稳投计划 API 不能启停**（401000「稳定周期投放计划不能启停」），建出即投放态。
+- 4030006「非目标用户人群包」是仅排除包（population 正向传被拒）；618 的两个自建标签包未共享到其他账户。
+- UAX 行（autoManage=1）：引擎只建计划层，组/创意平台自动搭建；beginTime 等组字段仅过本地校验不下发。

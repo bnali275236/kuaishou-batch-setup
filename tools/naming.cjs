@@ -20,6 +20,8 @@ const BID_MODE = {
 const DELIVERY = {
   /** 常规广告（站内信息流，版位 [6] 上下滑大屏） */
   NORMAL: '常规',
+  /** 搜索广告（ad_type=1，版位 [39]） */
+  SEARCH: '搜索',
   /** UAX 自动搭建（auto_build=1） */
   UAX: '全自动',
   /** 人群包定向计划（target.population，一包一计划） */
