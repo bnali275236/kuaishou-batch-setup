@@ -84,17 +84,33 @@ export class CreativeAttrsService {
       const creativeId = raw.creative_id != null ? String(raw.creative_id) : '';
       if (!creativeId) continue;
       const tags = Array.isArray(raw.creative_tag) ? (raw.creative_tag as unknown[]).map(String) : [];
+      // list 接口的 description 不在顶层，藏在 display_info.description / recommendation 里
+      // （recommendation = 创建时传的广告语，display_info.description = 实际展示文案）
+      const di = (raw.display_info ?? {}) as Record<string, unknown>;
+      const desc =
+        raw.description != null
+          ? String(raw.description)
+          : di.description != null
+            ? String(di.description)
+            : raw.recommendation != null
+              ? String(raw.recommendation)
+              : null;
       const row = {
         advertiserId,
         creativeId,
         creativeName: raw.creative_name != null ? String(raw.creative_name) : null,
         campaignId: raw.campaign_id != null ? String(raw.campaign_id) : null,
         unitId: raw.unit_id != null ? String(raw.unit_id) : null,
-        description: raw.description != null ? String(raw.description) : null,
+        description: desc,
         plcDescription: raw.native_plc_description != null ? String(raw.native_plc_description) : null,
         categoryName: raw.creative_category_name != null ? String(raw.creative_category_name) : null,
         tagsJson: tags.length ? JSON.stringify(tags) : null,
-        actionBarText: raw.action_bar_text != null ? String(raw.action_bar_text) : null,
+        actionBarText:
+          raw.action_bar_text != null
+            ? String(raw.action_bar_text)
+            : di.action_bar_text != null
+              ? String(di.action_bar_text)
+              : null,
       };
       await this.prisma.creativeAttribute.upsert({
         where: { advertiserId_creativeId: { advertiserId, creativeId } },
@@ -135,6 +151,37 @@ export class CreativeAttrsService {
       if (Array.isArray(v)) return v as Record<string, unknown>[];
     }
     return [];
+  }
+
+  /**
+   * 组 → 人群包定向映射（gw/dsp/unit/list 的 population / exclude_population 字段）。
+   * 用于把创意报表按组归因到人群包：人群包效果追溯的数据底座。
+   * 平台组列表会把 DMP 定向回传在 population 字段（文档 2264），
+   * 但本地 payload 冻结值只是创建时快照 —— 以平台实时回读为准。
+   */
+  async unitPopulationMap(advertiserId: string): Promise<{ popMap: Map<string, string[]>; unitCount: number }> {
+    const items: Record<string, unknown>[] = [];
+    for (let page = 1; page <= 25; page += 1) {
+      const data = await this.gateway.call<Record<string, unknown>>({
+        advertiserId,
+        path: PLAN_PATHS.UNIT_LIST,
+        body: { advertiser_id: Number(advertiserId), page, page_size: 200 },
+        category: 'query',
+        action: 'report.creativeAttrs.unitList',
+        retry: true,
+      });
+      const list = this.pickList(data);
+      items.push(...list);
+      if (list.length < 200) break;
+    }
+    const popMap = new Map<string, string[]>();
+    for (const raw of items) {
+      const unitId = raw.unit_id != null ? String(raw.unit_id) : '';
+      if (!unitId) continue;
+      const pops = Array.isArray(raw.population) ? (raw.population as unknown[]).map((v) => String(v)) : [];
+      if (pops.length) popMap.set(unitId, pops);
+    }
+    return { popMap, unitCount: items.length };
   }
 
   /**

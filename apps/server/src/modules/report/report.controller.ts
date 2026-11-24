@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { MAX_PAGE_SIZE, REALTIME_REPORT_LOOKBACK_DAYS } from '@wkbd/shared';
+import { PlanAssetsService } from '../plan/plan.assets';
 import { AsyncReportService } from './async-report.service';
 import { AttrGroupBy, CreativeAttrsService } from './creative-attrs.service';
 import { ReportLevel, ReportService } from './report.service';
@@ -41,6 +42,7 @@ export class ReportController {
     private readonly report: ReportService,
     private readonly asyncReport: AsyncReportService,
     private readonly creativeAttrs: CreativeAttrsService,
+    private readonly planAssets: PlanAssetsService,
   ) {}
 
   /**
@@ -155,5 +157,114 @@ export class ReportController {
   @Get('backfill/progress')
   backfillProgress() {
     return this.asyncReport.progress();
+  }
+
+  /**
+   * 人群包效果追溯：把创意级报表按「所属组的人群包定向」归因聚合。
+   * 链路 = 创意报表(带 unitId) × 组列表 population 字段(文档 2264) × dmp/population/list 包名。
+   * 同组挂多个包 → 各包分别计入（包维度赛马口径）；组未挂包 → 「未定向（通投）」桶。
+   * 未投放的包也返回（0 消耗），方便看到「哪些包还没用上」。
+   */
+  @Get('population-effects')
+  async populationEffects(
+    @Query('advertiserId') advertiserId?: string,
+    @Query('advertiserIds') advertiserIdsRaw?: string,
+    @Query('startDate') startDate: string = '',
+    @Query('endDate') endDate: string = '',
+  ) {
+    const ids = [
+      ...new Set(
+        [
+          ...(advertiserIdsRaw ? advertiserIdsRaw.split(',').map((s) => s.trim()) : []),
+          ...(advertiserId ? [String(advertiserId)] : []),
+        ].filter(Boolean),
+      ),
+    ];
+    interface Bucket {
+      id: string;
+      name: string;
+      coverWan: number;
+      usable: boolean;
+      owners: Set<string>;
+      units: Set<string>;
+      charge: number;
+      show: number;
+      bclick: number;
+      activation: number;
+      payCount: number;
+    }
+    const buckets = new Map<string, Bucket>();
+    const touch = (id: string, name: string, coverWan: number, usable: boolean, owner: string) => {
+      if (!buckets.has(id)) {
+        buckets.set(id, { id, name, coverWan, usable, owners: new Set(), units: new Set(), charge: 0, show: 0, bclick: 0, activation: 0, payCount: 0 });
+      }
+      const b = buckets.get(id)!;
+      b.owners.add(owner);
+      if (coverWan > 0 && b.coverWan === 0) b.coverWan = coverWan;
+      return b;
+    };
+    const NONE_KEY = '__none__';
+
+    const results = await Promise.all(
+      ids.map(async (id) => {
+        try {
+          const [pops, unitPop, page] = await Promise.all([
+            this.planAssets.listPopulations(id).catch(() => []),
+            this.creativeAttrs.unitPopulationMap(id).catch(() => ({ popMap: new Map<string, string[]>(), unitCount: 0 })),
+            this.report
+              .query('creative', { advertiserId: id, startDate, endDate, page: 1, pageSize: MAX_PAGE_SIZE })
+              .then((p) => (p.rows ?? []) as unknown as Record<string, unknown>[]),
+          ]);
+          return { id, pops, unitPop: unitPop.popMap, rows: page };
+        } catch {
+          return { id, pops: [], unitPop: new Map<string, string[]>(), rows: [] as Record<string, unknown>[] };
+        }
+      }),
+    );
+
+    for (const res of results) {
+      const popName = new Map(res.pops.map((p) => [p.id, p] as const));
+      // 先把所有包挂上（0 消耗的包也要展示）
+      for (const p of res.pops) touch(p.id, p.name, p.coverWan, p.usable, res.id);
+      // 未定向桶
+      touch(NONE_KEY, '未定向（通投）', 0, true, res.id);
+
+      for (const r of res.rows) {
+        const unitId = String(r.unitId || '');
+        const popIds = res.unitPop.get(unitId);
+        const keys = popIds && popIds.length ? popIds : [NONE_KEY];
+        const owner = res.id;
+        for (const k of keys) {
+          const known = popName.get(k);
+          const b = touch(k, known?.name ?? k, known?.coverWan ?? 0, known?.usable ?? true, owner);
+          b.units.add(unitId);
+          b.charge += Number(r.charge || 0);
+          b.show += Number(r.show || 0);
+          b.bclick += Number(r.bclick || 0);
+          b.activation += Number(r.activation || 0);
+          b.payCount += Number(r.payCount || 0);
+        }
+      }
+    }
+
+    const rows = [...buckets.values()]
+      .map((b) => ({
+        id: b.id,
+        key: b.id,
+        name: b.name,
+        coverWan: b.coverWan,
+        usable: b.usable,
+        owners: [...b.owners],
+        units: b.units.size,
+        charge: Number(b.charge.toFixed(2)),
+        show: b.show,
+        bclick: b.bclick,
+        activation: b.activation,
+        actCost: b.activation > 0 ? Number((b.charge / b.activation).toFixed(2)) : null,
+        payCount: b.payCount,
+        payCost: b.payCount > 0 ? Number((b.charge / b.payCount).toFixed(2)) : null,
+      }))
+      .sort((a, b) => b.charge - a.charge);
+    return { accounts: ids, startDate, endDate, rows };
   }
 }
