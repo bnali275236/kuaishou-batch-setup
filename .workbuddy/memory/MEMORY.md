@@ -49,6 +49,8 @@ access 1 天 / refresh 30 天，**刷新即轮换（旧的立即失效）**→ �
 ## 工程约定
 新平台调用须登记 `MAPI_PATHS`；ID 一律 String 存储（toId 还原）；server tsconfig `incremental:false`；发版递增 electron 版本号；xlsx chunk 体积警告良性。迁移用 `prisma migrate deploy`（CLI 在根 `node_modules/prisma/build/index.js`）。
 
+**命名铁律（2026-11-23 用户拍板）**：计划/组名 = `PZ<户号>-<素材批次>-<出价方式>-<投放类型>-<转化目标>-<MMDD>`，例 `PZ618-新素材-最大转化-常规-激活-1123`（最大转化=MCB / 出价=OCPX；常规=站内信息流 [6] / UAX；激活=ocpx180）。多组从 `-02` 起。**创意名 = 素材名去扩展名**，绝不能留 `新建自定义创意_...` 默认名。统一由 `tools/naming.cjs` 生成，别在脚本里手拼。创意改名走 `PLAN_PATHS.CREATIVE_UPDATE`（只传 advertiser_id+creative_id+creative_name 即可，增量更新；回读有 5~8s 延迟）。
+
 ## ⚠️ 打包护栏（单次调用删>50 文件即抛错）
 vite emptyOutDir 关掉、由 stage.js `pruneUnreferencedAssets()` 清（须扫全部文本防误删 xlsx chunk）；staging 不跑 prisma generate 改 copyOver（打包前先 db:generate）；electron-builder 尾部 exit 1 无害，只看 `release/快手投放工作台 Setup <ver>.exe` 是否生成。
 

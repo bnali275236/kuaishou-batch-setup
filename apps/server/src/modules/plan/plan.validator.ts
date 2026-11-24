@@ -113,10 +113,11 @@ export function validateRows(rows: PlanRow[]): PlanRowIssue[] {
         push('bidYuan', `CPC 出价须在 ${BID_MIN_YUAN}~${BID_MAX_YUAN} 元之间`);
       }
     } else if (row.bidType === 10 || row.bidType === 12) {
-      // OCPM / MCB：cpa_bid 与优化目标必填
-      if (row.cpaBidYuan == null) {
-        push('cpaBidYuan', 'OCPM / MCB 出价类型下必须填写出价');
-      } else if (row.cpaBidYuan < OCPM_BID_MIN_YUAN || row.cpaBidYuan > OCPM_BID_MAX_YUAN) {
+      // OCPM：cpa_bid 必填；MCB（bid_type 12 最大转化）：不设目标成本，出价可不填
+      // （618 户在投组 bid_type=12 / cpa_bid=0 实测合法，2026-11-24 放宽）
+      if (row.bidType === 10 && row.cpaBidYuan == null) {
+        push('cpaBidYuan', 'OCPM 出价类型下必须填写出价');
+      } else if (row.cpaBidYuan != null && (row.cpaBidYuan < OCPM_BID_MIN_YUAN || row.cpaBidYuan > OCPM_BID_MAX_YUAN)) {
         push('cpaBidYuan', `转化出价须在 ${OCPM_BID_MIN_YUAN}~${OCPM_BID_MAX_YUAN} 元之间`);
       }
       if (!row.ocpxActionType) {

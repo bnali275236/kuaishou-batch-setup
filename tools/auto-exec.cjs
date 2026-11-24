@@ -166,7 +166,8 @@ async function photoUploadTimes(accId) {
   }
 }
 
-/** 平台侧当前出价（by-ids，authority）：Map `${acc}:${unitId}` → bidYuan */
+/** 平台侧当前出价（by-ids，authority）：Map `${acc}:${unitId}` → { bid, isMcb }
+ *  最大转化（MCB）组没有出价，任何「调价」都会把组改成 oCPX 或直接压死，必须识别出来跳过。 */
 async function platformBids(accId, unitIds) {
   const map = new Map();
   if (!unitIds.length) return map;
@@ -176,7 +177,9 @@ async function platformBids(accId, unitIds) {
     for (const u of Array.isArray(items) ? items : []) {
       const id = String(u.unitId || u.id || '');
       const bid = Number(u.bidYuan ?? u.bid ?? u.cpaBid ?? 0);
-      if (id && bid > 0) map.set(`${accId}:${id}`, bid);
+      const bidType = u.bidType == null ? null : Number(u.bidType);
+      const isMcb = [1, 12].includes(bidType) || bid === 0; // bid_type 1/12 或无出价
+      if (id) map.set(`${accId}:${id}`, { bid, isMcb });
     }
   } catch (e) {
     log(`平台出价回读失败（降级用 payload 出价）: ${e.message}`);
@@ -342,7 +345,11 @@ async function run(ctx, perAccount) {
       const uid = String(r.unitId || '');
       const u = umap.get(`${pa.acc.id}:${uid}`);
       if (!u) continue; // 不是我们的组
-      if (pBids.has(`${pa.acc.id}:${uid}`)) u.bid = pBids.get(`${pa.acc.id}:${uid}`);
+      const key = `${pa.acc.id}:${uid}`;
+      const meta = pBids.get(key);
+      // 最大转化组（无出价）：不参与任何调价规则
+      if (meta && meta.isMcb) continue;
+      if (meta) u.bid = meta.bid;
       const charge = Number(r.charge || 0);
       const show = Number(r.aclick || r.show || 0);
       const act = Number(r.activation || 0);

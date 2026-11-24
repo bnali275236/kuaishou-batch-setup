@@ -3,7 +3,7 @@
  * 账户日预算动态调拨（2026-11-10 用户口径）
  *
  * 规则：
- *  - 两户合计固定 totalBudgetYuan（5000），单户额度可互倒；
+ *  - 合计固定 totalBudgetYuan，单户额度可互倒；
  *  - 目标：每户 日预算 ≥ 2×已消耗（即消耗利用率 ≤50%），不让任何一户跑到 50% 以上；
  *  - 富余额度按当前消耗占比分配（花得快的户拿更多余量）；
  *  - 求和恒等于 5000。
@@ -103,9 +103,10 @@ async function api(p, body) {
 
 function pushDingtalk(card) {
   if (!CFG.dingtalk.enabled) return;
+  const target = CFG.dingtalk.groupId || CFG.dingtalk.group;
   const res = spawnSync(
     process.execPath,
-    [DWS_JS, 'chat', '+send-to-group', '--group', CFG.dingtalk.group, '--content', card, '--yes', '--format', 'json'],
+    [DWS_JS, 'chat', '+send-to-group', '--group', target, '--content', card, '--yes', '--format', 'json'],
     { encoding: 'utf-8', timeout: 60000 },
   );
   const out = ((res.stdout || '') + (res.stderr || '')).trim();
@@ -173,7 +174,7 @@ async function rebalance(metrics, current, opts = {}) {
     const lines = [
       `### 【快手·预算调拨】${new Date().toLocaleDateString('zh-CN')} ${String(hour).padStart(2, '0')}时`,
       '',
-      `口径：每户额度 ≥ 2×消耗（利用率 ≤50%），两户合计 ${total} 不变。`,
+      `口径：每户额度 ≥ 2×消耗（利用率 ≤50%），合计 ${total} 不变。`,
       '',
     ];
     acts.forEach((a) => lines.push(`- **${a.tag}** ${a.from} → **${a.to}** 元（${a.why}）`));

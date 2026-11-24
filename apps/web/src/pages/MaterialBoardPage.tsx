@@ -607,7 +607,11 @@ function MaterialTable({
 
 const VIDEO_MAX_BYTES = 500 * 1024 * 1024;
 
-/** 从平台原始条目里挑出可用地址（photo_url 是视频播放地址，不一定是封面） */
+/**
+ * 从平台原始条目里挑出可用地址。
+ * 实测 video/list 的字段：`cover_url` = 封面 jpg，`url` = 视频播放地址（mp4）——
+ * 注意不是 photo_url（那个字段在 list 里根本没有，早期取错导致弹窗只显示封面）。
+ */
 function videoUrlsOf(item: AssetItem): { cover?: string; video?: string } {
   const raw = (item.raw ?? {}) as Record<string, unknown>;
   const pick = (...keys: string[]): string | undefined => {
@@ -618,11 +622,12 @@ function videoUrlsOf(item: AssetItem): { cover?: string; video?: string } {
     return undefined;
   };
   const imageLike = (u?: string) => /\.(jpe?g|png|webp|gif)(\?|#|$)/i.test(u ?? '');
-  const videoLike = (u?: string) => /\.(mp4|mov|webm)(\?|#|$)/i.test(u ?? '');
-  const cover = pick('cover_url', 'image_url', 'poster_url') ?? (imageLike(item.cover) ? item.cover : undefined);
+  const videoLike = (u?: string) => /\.(mp4|mov|webm|m3u8)(\?|#|$)/i.test(u ?? '');
+  const cover =
+    pick('cover_url', 'image_url', 'poster_url') ?? (imageLike(item.cover) ? item.cover : undefined);
   const video =
-    (videoLike(item.cover) ? item.cover : undefined) ??
-    (videoLike(raw.photo_url as string) ? (raw.photo_url as string) : pick('photo_url'));
+    pick('url', 'photo_url', 'play_url', 'video_url') ??
+    (videoLike(item.cover) ? item.cover : undefined);
   return { cover, video };
 }
 
@@ -639,6 +644,10 @@ function LibraryPreviewModal({
   pushing?: boolean;
 }) {
   const { cover, video } = item ? videoUrlsOf(item) : { cover: undefined, video: undefined };
+  const [videoBroken, setVideoBroken] = useState(false);
+  useEffect(() => {
+    setVideoBroken(false);
+  }, [item?.id]);
   return (
     <Modal
       open={Boolean(item)}
@@ -663,15 +672,29 @@ function LibraryPreviewModal({
       {item && (
         <div style={{ display: 'flex', gap: 16 }}>
           <div style={{ width: 240, flex: 'none' }}>
-            {video ? (
+            {video && !videoBroken ? (
               <video
                 src={video}
                 poster={cover}
                 controls
+                preload="metadata"
+                onError={() => setVideoBroken(true)}
                 style={{ width: '100%', borderRadius: 8, background: '#000' }}
               />
             ) : cover ? (
-              <img src={cover} alt="" style={{ width: '100%', borderRadius: 8 }} />
+              <div>
+                <img src={cover} alt="" style={{ width: '100%', borderRadius: 8 }} />
+                {video && (
+                  <Typography.Link
+                    href={video}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ fontSize: 12, display: 'block', marginTop: 6 }}
+                  >
+                    播放器加载失败，点此在新窗口打开视频
+                  </Typography.Link>
+                )}
+              </div>
             ) : (
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="平台未返回预览地址" />
             )}

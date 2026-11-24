@@ -24,6 +24,18 @@ export interface StructureItem {
   scheduleTime: string | null;
   /** 投放版位 scene_ids —— 仅组；用于核验平台是否把优选(1)静默扩成 [1,10] 联盟 */
   sceneIds: number[] | null;
+  /** 创意用到的视频素材 photoId —— 仅创意；用于判断「这条素材是否已经上过计划」 */
+  photoIds?: string[] | null;
+  /** 创意文案描述 —— 仅创意；补创意时复用已验证文案 */
+  description?: string | null;
+  /** 创意行动按钮文案 —— 仅创意 */
+  actionBarText?: string | null;
+  /** 平台原始行（仅创意层返回，用于核对标签/原生标识等未建模字段） */
+  raw?: Record<string, unknown> | null;
+  /** 原生广告标识 outer_loop_native（0 非原生 / 1 原生）—— 组与创意必须一致，否则平台报「原生标识不统一」 */
+  outerLoopNative?: number | null;
+  /** 创意点击监测链接 —— 仅创意；补创意时必须带上（平台校验「点击监测链接必填」） */
+  clickTrackUrl?: string | null;
   putStatusText: string;
 }
 
@@ -187,8 +199,181 @@ export class ManageService {
         const raw = r.scene_id ?? r.scene_ids;
         return Array.isArray(raw) ? raw.map((x) => Number(x)) : raw != null ? [Number(raw)] : null;
       })(),
+      // 创意：把用到的素材 photoId 也带出来（补素材前要先知道哪些已经上过）
+      photoIds: (() => {
+        if (level !== 'creative') return null;
+        const out = new Set<string>();
+        if (r.photo_id != null && String(r.photo_id) !== '') out.add(String(r.photo_id));
+        const vids = (r.creative_videos ?? r.videos ?? []) as Array<Record<string, unknown>>;
+        if (Array.isArray(vids)) {
+          for (const v of vids) {
+            const pid = v?.photo_id ?? v?.photoId;
+            if (pid != null && String(pid) !== '') out.add(String(pid));
+          }
+        }
+        return [...out];
+      })(),
+      description: level === 'creative' ? ((r.description as string | undefined) ?? null) : null,
+      actionBarText: level === 'creative' ? ((r.action_bar_text as string | undefined) ?? null) : null,
+      raw: level === 'campaign' || level === 'unit' || level === 'creative' ? r : null,
+      outerLoopNative: r.outer_loop_native != null ? Number(r.outer_loop_native) : null,
+      clickTrackUrl:
+        level === 'creative'
+          ? ((r.click_track_url as string | undefined) ?? (r.click_url as string | undefined) ?? null)
+          : null,
     };
     return base;
+  }
+
+  /**
+   * 往**已存在的组**里追加自定义创意（每条创意一个视频素材）。
+   *
+   * 场景：手工在平台建好一个计划/组后，用未上过计划的素材批量补创意。
+   * 逐条提交、逐条回报——平台可能部分成功，不能假定全成功。
+   */
+  async createCreatives(
+    advertiserId: string,
+    unitId: string,
+    items: Array<{
+      photoId: string;
+      name?: string;
+      description?: string;
+      actionBarText?: string;
+      clickTrackUrl?: string;
+      imageToken?: string;
+      /** 额外原样下发的字段（如原生标识/创意标签/kol），用于复刻已有点位的创意参数 */
+      fields?: Record<string, unknown>;
+    }>,
+  ): Promise<Array<{ photoId: string; ok: boolean; creativeId?: string; error?: string }>> {
+    await this.assertWritable(advertiserId);
+    const out: Array<{ photoId: string; ok: boolean; creativeId?: string; error?: string }> = [];
+    for (const it of items) {
+      // 先铺「复刻字段」（原生标识、创意标签、kol 等），再用本次明确的字段覆盖关键项
+      const body: Record<string, unknown> = { ...(it.fields || {}) };
+      Object.assign(body, {
+        advertiser_id: this.numericId(advertiserId),
+        unit_id: this.numericId(unitId),
+        creative_name: String(it.name || `创意-${it.photoId}`).slice(0, 120),
+        creative_material_type: 1,
+        action_bar_text: (it.actionBarText || '立即下载').trim(),
+        photo_id: it.photoId,
+      });
+      if (it.imageToken) body.image_token = String(it.imageToken);
+      if (it.description) body.description = String(it.description).slice(0, 60);
+      // 平台校验「点击监测链接必填」：自定义创意用 click_track_url
+      if (it.clickTrackUrl) body.click_track_url = String(it.clickTrackUrl);
+      try {
+        const data = await this.gateway.call<Record<string, unknown>>({
+          advertiserId,
+          path: PLAN_PATHS.CREATIVE_CREATE,
+          body,
+          category: 'creative',
+          action: 'manage.creative.create',
+        });
+        out.push({ photoId: it.photoId, ok: true, creativeId: String(data?.creative_id ?? '') });
+      } catch (e) {
+        out.push({ photoId: it.photoId, ok: false, error: (e as Error).message.slice(0, 200) });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 在已有计划下新建广告组（参数从现有组克隆）。
+   *
+   * 场景：单组创意上限 15 条，素材多的时候要拆第二个组。
+   * 克隆时剔除平台只读字段，避免「字段不可修改」类报错。
+   */
+  async createUnit(
+    advertiserId: string,
+    campaignId: string,
+    payload: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    await this.assertWritable(advertiserId);
+    const body: Record<string, unknown> = { ...payload };
+    for (const k of [
+      'unit_id',
+      'create_time',
+      'update_time',
+      'review_detail',
+      'status',
+      'study_status',
+      'support_unit_ids',
+      'page_audit_status',
+      'audit_status',
+      'reject_reason',
+    ]) {
+      delete body[k];
+    }
+    body.advertiser_id = this.numericId(advertiserId);
+    body.campaign_id = this.numericId(campaignId);
+    return this.gateway.call<Record<string, unknown>>({
+      advertiserId,
+      path: PLAN_PATHS.UNIT_CREATE,
+      body,
+      category: 'create',
+      action: 'manage.unit.create',
+    });
+  }
+
+  /** 改计划/组/创意名称。组更新要求带 unit_name + bid_type（平台校验），改名时先回读组再提交 */
+  async rename(
+    advertiserId: string,
+    level: 'campaign' | 'unit' | 'creative',
+    id: string,
+    name: string,
+  ): Promise<Record<string, unknown>> {
+    await this.assertWritable(advertiserId);
+    const newName = String(name || '').trim();
+    if (!newName) throw new Error('新名称不能为空');
+    if (newName.length > 100) throw new Error('名称超过 100 字，平台会拒收');
+
+    if (level === 'creative') {
+      const list = await this.planApi.listCreatives(advertiserId, [id]);
+      const cur = list.find((c) => String(c.creative_id ?? c.id) === String(id));
+      if (!cur) throw new Error(`未找到创意 ${id}（可能已被删除）`);
+      return this.gateway.call<Record<string, unknown>>({
+        advertiserId,
+        path: PLAN_PATHS.CREATIVE_UPDATE,
+        body: {
+          advertiser_id: this.numericId(advertiserId),
+          creative_id: this.numericId(id),
+          creative_name: newName,
+        },
+        category: 'create',
+        action: 'manage.creative.rename',
+      });
+    }
+
+    if (level === 'campaign') {
+      return this.gateway.call<Record<string, unknown>>({
+        advertiserId,
+        path: PLAN_PATHS.CAMPAIGN_UPDATE,
+        body: {
+          advertiser_id: this.numericId(advertiserId),
+          campaign_id: this.numericId(id),
+          campaign_name: newName,
+        },
+        category: 'create',
+        action: 'manage.campaign.rename',
+      });
+    }
+    const units = await this.planApi.listUnits(advertiserId, [id]);
+    const unit = units[0];
+    if (!unit) throw new Error(`未找到广告组 ${id}（可能已被删除）`);
+    if (unit.bid_type == null) throw new Error('平台未返回组出价类型，无法安全改名');
+    return this.gateway.call<Record<string, unknown>>({
+      advertiserId,
+      path: PLAN_PATHS.UNIT_UPDATE,
+      body: {
+        advertiser_id: this.numericId(advertiserId),
+        unit_id: this.numericId(id),
+        unit_name: newName,
+        bid_type: Number(unit.bid_type),
+      },
+      category: 'create',
+      action: 'manage.unit.rename',
+    });
   }
 
   /* ---------------- 层级操作 ---------------- */

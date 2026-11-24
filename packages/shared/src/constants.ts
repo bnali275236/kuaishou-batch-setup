@@ -580,6 +580,8 @@ export const PLAN_PATHS = {
   CREATIVE_LIST: '/rest/openapi/gw/dsp/creative/list',
   /** ✅ 实测通过：置暂停 code=0，268ms */
   CREATIVE_STATUS_UPDATE: '/rest/openapi/v1/creative/update/status',
+  /** 修改广告创意（与 create 同域，字段同名）：用于批量规范创意命名 */
+  CREATIVE_UPDATE: '/rest/openapi/gw/dsp/creative/update',
 
   /* —— 盯盘看板「进入账户」后的层级调整（2026-09-29 按官方文档核对路径）—— */
   /** 修改广告计划（文档 2260）：campaign_id + 选填 day_budget（厘，0=不限） */

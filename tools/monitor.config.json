@@ -1,20 +1,32 @@
 {
   "accounts": [
-    { "id": "124276386", "tag": "386" },
-    { "id": "124276387", "tag": "387" }
+    {
+      "id": "130483618",
+      "tag": "618",
+      "shortName": "盼之电竞",
+      "note": "shortName 用于卡片标题与账户块（短显示名）；平台完整账户名由 /api/oauth/accounts 回读，仅作追溯，不进卡片"
+    }
   ],
   "api": "http://127.0.0.1:7801",
   "dingtalk": {
-    "group": "快手投放沟通群",
-    "enabled": true
+    "group": "盼之电竞监控日报群",
+    "groupId": "cidX+Ya8v5gR72W1j4fjy33XQ==",
+    "enabled": true,
+    "note": "2026-11-23 用户明确：禁止推送到「盼之电竞-投放大群」（19 人大群），只推用户自建 1 人私群「盼之电竞监控日报群」。groupId 为 openConversationId，稳定 ID 不走群名解析，防重名/改名影响"
+  },
+  "dailySheet": {
+    "enabled": true,
+    "nodeId": "R1zknDm0WR9rDnlOud26rAq58BQEx5rG",
+    "sheetId": "kgqie6hm",
+    "advertiserId": "130483618",
+    "note": "钉钉表格「盼之电竞信息流投放日报表」，工作表「快手信息流」（按渠道命名，后续接新渠道时新建同名工作表）。daemon 每天 09:35 填昨日（落定值）、23:30 填当日（准实时，次日覆盖更新）。幂等：同日期行覆盖，无则追加"
   },
   "bidYuan": 8,
-  "totalBudgetYuan": 5000,
-  "dailyBudgetYuan": 2500,
+  "totalBudgetYuan": 1000,
+  "dailyBudgetYuan": 1000,
   "budgetPlan": {
-    "124276386": 2500,
-    "124276387": 2500,
-    "note": "两户合计 totalBudgetYuan=5000；单户额度可按消耗节奏调拨，巡检会给出建议值"
+    "130483618": 1000,
+    "note": "单户（盼之电竞 618）；账户日预算 1000、计划日预算 500（MCB 测试期）。旧 386/387 已删除，配置同步切换"
   },
   "learning": {
     "observeMaxAct": 8,
@@ -45,7 +57,8 @@
   "dedupeMinutes": 90,
   "heartbeat": true,
   "autoExecute": {
-    "enabled": true,
+    "enabled": false,
+    "note": "2026-11-23 暂关：618 户最大转化计划处于学习期，K1/K2 用绝对金额（36/54 元）判定，起投首小时容易误杀创意。用户明确恢复自动执行后再置 true",
     "level": "B",
     "bidMin": 8,
     "bidMax": 9,

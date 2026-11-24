@@ -70,9 +70,22 @@ export interface PopulationItem {
   /** 人群包 ID（orientation_id），字符串透传 */
   id: string;
   name: string;
+  /** 包内人数：优先 record_size（上传/推送包），为 0 时退 cover_num（标签/扩展包只有覆盖人数） */
   recordSize: number;
-  /** 0 计算中 / 1 已生效 / 2 已删除 …（服务端只返回 1） */
+  /** 覆盖人数（cover_num），标签类人群包用这个衡量规模 */
+  coverNum: number;
+  /**
+   * 平台状态码。实测（2026-11-24，618 户 dmp/population/list）：
+   * 系统包与自建标签包都返回 **4**，且带 verify_time、可直接用于定向 ——
+   * 所以 4 属于「可用」。旧代码只留 status===1，导致人群包列表恒为空。
+   */
   status: number;
+  /** 是否可用（1 / 4）；其余状态可能是计算中 / 审核中 / 失效 */
+  usable: boolean;
+  /** 覆盖人数（万，1 位小数），前端展示用 */
+  coverWan: number;
+  /** 原始条目，排查用 */
+  raw: Record<string, unknown>;
 }
 
 /** 创意分类树节点（v1/creative/creative_category/list） */
@@ -421,7 +434,9 @@ export class PlanAssetsService {
 
   /**
    * 人群包列表（v2/dmp/population/list）。
-   * 只取「已生效(1)」的包；orientation_id 超出 JS 安全整数，统一字符串化。
+   * 平台实测返回 {total_count, details}，status 恒为 4（不是文档常见的 1），
+   * 因此**不再按状态过滤**：全部返回，由 usable 标记 + 前端展示判断。
+   * orientation_id 超出 JS 安全整数，统一字符串化。
    */
   async listPopulations(advertiserId: string, force = false): Promise<PopulationItem[]> {
     const kind = `population:${advertiserId}`;
@@ -435,7 +450,7 @@ export class PlanAssetsService {
       body: { advertiser_id: Number(advertiserId), page: 1, page_size: 100 },
       action: 'plan.assets.population_list',
     });
-    const list = this.pickList(data, ['list', 'details', 'populations', 'data']);
+    const list = this.pickList(data, ['details', 'list', 'populations', 'population_list', 'data']);
     const items: PopulationItem[] = [];
     for (const item of list) {
       if (typeof item !== 'object' || item === null) continue;
@@ -443,17 +458,27 @@ export class PlanAssetsService {
       const id = pickString(row, ['orientation_id', 'id']);
       const name = pickString(row, ['orientation_name', 'name']);
       if (!id) continue;
+      const num = (v: unknown) => (typeof v === 'number' ? v : Number(v) || 0);
+      const recordSize = num(row.record_size);
+      const coverNum = num(row.cover_num);
+      const status = num(row.status);
+      const scale = recordSize > 0 ? recordSize : coverNum;
       items.push({
         id,
         name: name || id,
-        recordSize: typeof row.record_size === 'number' ? row.record_size : Number(row.record_size) || 0,
-        status: typeof row.status === 'number' ? row.status : Number(row.status) || 0,
+        recordSize: scale,
+        coverNum,
+        status,
+        usable: status === 1 || status === 4,
+        coverWan: Number((scale / 10000).toFixed(1)),
+        raw: row,
       });
     }
-    const active = items.filter((i) => i.status === 1);
-    this.cache.set(kind, { expiresAt: Date.now() + CACHE_TTL_MS, items: active as unknown });
-    this.logger.log(`人群包同步 账户 ${advertiserId}：${active.length} 个已生效`);
-    return active;
+    this.cache.set(kind, { expiresAt: Date.now() + CACHE_TTL_MS, items: items as unknown });
+    this.logger.log(
+      `人群包同步 账户 ${advertiserId}：${items.length} 个（可用 ${items.filter((i) => i.usable).length}）`,
+    );
+    return items;
   }
 
   /**

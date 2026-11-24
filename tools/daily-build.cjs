@@ -17,6 +17,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const effects = require('./auto-effects.cjs');
 const { ensureBackend } = require('./ensure-backend.cjs');
+const { planName } = require('./naming.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const CFG = JSON.parse(fs.readFileSync(path.join(__dirname, 'monitor.config.json'), 'utf-8'));
@@ -298,7 +299,9 @@ async function alreadyDone(name) {
     process.exit(0);
   }
 
-  const rows = usable.map((x, i) => buildRow(x.acc.id, x.acc.tag, i + 1, `PZ${x.acc.tag}-跑量复投-${suffix}`, today, bid, x.vids));
+  const rows = usable.map((x, i) =>
+    buildRow(x.acc.id, x.acc.tag, i + 1, planName({ tag: x.acc.tag, batch: '跑量复投', bidMode: 'OCPX', date: suffix }), today, bid, x.vids),
+  );
   const allMissing = perAccount.flatMap((x) => x.missing.map((m) => `${x.acc.tag}缺：${m}`));
 
   for (const r of rows) {

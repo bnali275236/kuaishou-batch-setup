@@ -126,8 +126,41 @@ function startServer(reason) {
   return p;
 }
 
+/* ---------------- 盯盘守护（monitor-daemon）存活保障 ----------------
+ * monitor-daemon 负责整点巡检 → 推送钉钉私群。
+ * 它通常由 web-launch 拉起；这里再兜一层：心跳过期就补拉，避免「launcher 是老版本」时无人值守。
+ */
+const MONITOR_DAEMON = path.join(__dirname, 'monitor-daemon.cjs');
+const DAEMON_BEAT = path.join(RUNTIME, 'daemon.beat');
+let lastDaemonSpawn = 0;
+function ensureMonitorDaemon() {
+  try {
+    const st = fs.statSync(DAEMON_BEAT);
+    if (Date.now() - st.mtimeMs < 3 * 60 * 1000) return; // 心跳新鲜，活着
+  } catch {
+    /* 没有心跳文件 → 视作没在跑 */
+  }
+  if (Date.now() - lastDaemonSpawn < 5 * 60 * 1000) return; // 5 分钟内只补拉一次，防风暴
+  lastDaemonSpawn = Date.now();
+  try {
+    const out = fs.openSync(path.join(RUNTIME, 'monitor-daemon.out.log'), 'a');
+    const p = spawn(process.execPath, [MONITOR_DAEMON], {
+      cwd: ROOT,
+      detached: true,
+      stdio: ['ignore', out, out],
+      env: process.env,
+      windowsHide: true,
+    });
+    p.unref();
+    log(`盯盘守护未在跑，已拉起 pid=${p.pid}`);
+  } catch (e) {
+    log(`盯盘守护拉起失败：${e.message}`);
+  }
+}
+
 async function tick() {
   bumpDay();
+  ensureMonitorDaemon();
   // 每轮都刷新心跳，供单实例判断使用（不做它，pid 复用时会把新守护挡在门外）
   try {
     fs.writeFileSync(BEAT_FILE, String(Date.now()));

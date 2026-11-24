@@ -103,8 +103,100 @@ async function accountMetrics(dateStr) {
   return out;
 }
 
-async function creativeRows(accId, dateStr) {
-  const rows = [];
+/** 账户 ID → 平台账户名（报告里一律用账户名，不用内部代号） */
+let _accNames = null;
+async function accountNameMap() {
+  if (_accNames) return _accNames;
+  const map = new Map();
+  try {
+    const r = await api('/api/oauth/accounts');
+    const list = Array.isArray(r) ? r : r.items || r.accounts || [];
+    for (const a of list) {
+      const id = a.advertiserId || a.id;
+      if (id) map.set(String(id), String(a.accountName || a.name || id));
+    }
+  } catch (e) {
+    log(`账户名拉取失败（退回代号）：${e.message}`);
+  }
+  _accNames = map;
+  return map;
+}
+
+/**
+ * 给 metrics 挂名字：
+ *   m.name     = 短显示名（配置 shortName 优先；没配就用平台账户名，再退化到代号）
+ *   m.fullName = 平台完整账户名（只作追溯，不进卡片，避免标题过长）
+ */
+function applyAccountNames(metrics, names) {
+  const short = new Map(CFG.accounts.map((a) => [String(a.id), a.shortName]));
+  for (const m of metrics) {
+    const full = names.get(String(m.id)) || '';
+    m.fullName = full;
+    m.name = short.get(String(m.id)) || full || m.tag || m.id;
+  }
+  return metrics;
+}
+
+/**
+ * 计划详情：名称 / 日预算 / 出价方式 / 投放状态。
+ * 平台列表接口必须带 ids，所以先用「本地任务库 + 今日有消耗的计划」拼出 ids 再回读。
+ */
+async function loadCampaignBrief(accId, extraIds = []) {
+  const map = new Map();
+  const ids = new Set(extraIds.map(String));
+  try {
+    const { PrismaClient } = require(path.join(ROOT, 'node_modules/@prisma/client'));
+    const dbFile = path.join(process.env.APPDATA || process.env.HOME || '', '快手投放工作台', 'app.db');
+    const prisma = new PrismaClient({ datasources: { db: { url: 'file:' + dbFile } } });
+    try {
+      const items = await prisma.batchTaskItem.findMany({
+        where: {
+          advertiserId: String(accId),
+          level: 'CAMPAIGN',
+          platformId: { not: null },
+          createdAt: { gte: new Date(Date.now() - 14 * 86400e3) },
+        },
+        select: { platformId: true, displayName: true },
+      });
+      for (const it of items) if (it.platformId) ids.add(String(it.platformId));
+    } finally {
+      await prisma.$disconnect();
+    }
+  } catch (e) {
+    log(`本地计划清单读取失败：${e.message}`);
+  }
+  if (!ids.size) return map;
+  try {
+    const rows = await api('/api/manage/structure/by-ids', {
+      advertiserId: String(accId),
+      level: 'campaign',
+      ids: [...ids],
+    });
+    for (const r of rows || []) {
+      const raw = r.raw || {};
+      const bidType = r.bidType == null ? null : Number(r.bidType);
+      const bidYuan = Number(r.bidYuan || 0);
+      const dayBudget = Number(r.dayBudgetYuan || 0);
+      map.set(String(r.id), {
+        id: String(r.id),
+        name: String(r.name || '').trim() || `计划${String(r.id).slice(-6)}`,
+        putStatus: r.putStatus,
+        putStatusText: r.putStatusText || (r.putStatus === 1 ? '投放中' : '暂停'),
+        dayBudgetYuan: dayBudget,
+        bidType,
+        bidYuan,
+        createTime: raw.create_time || null,
+        // 最大转化（MCB）：无出价，靠预算控成本；bid_type 1/12 或「预算>0 且出价=0」
+        isMcb: [1, 12].includes(bidType) || (bidYuan === 0 && dayBudget > 0),
+      });
+    }
+  } catch (e) {
+    log(`计划详情回读失败：${e.message}`);
+  }
+  return map;
+}
+
+async function creativeRows(accId, dateStr) {  const rows = [];
   for (let page = 1; page <= 20; page += 1) {
     const r = await api('/api/report/level/creative', {
       advertiserId: accId,
@@ -152,33 +244,23 @@ async function grantsStatus() {
   }
 }
 
-/** 计划 ID → 计划名（平台报表不带计划名，从本地任务库回填，缓存 24h） */
-async function loadCampaignNames() {
-  const cachePath = path.join(RUNTIME, 'campaign-names.json');
+/** 近 N 天报表里出现过的计划 ID（用来补「今天零消耗但仍在投」的计划） */
+async function recentCampaignIds(accId, days = 3, endDate = ymd()) {
+  const ids = new Set();
   try {
-    const st = fs.statSync(cachePath);
-    if (Date.now() - st.mtimeMs < 86400000) {
-      return new Map(Object.entries(JSON.parse(fs.readFileSync(cachePath, 'utf-8'))));
-    }
-  } catch {
-    /* 缓存不存在或损坏，重建 */
-  }
-  const map = new Map();
-  try {
-    const { PrismaClient } = require(path.join(ROOT, 'node_modules/@prisma/client'));
-    const dbFile = path.join(process.env.APPDATA || process.env.HOME || '', '快手投放工作台', 'app.db');
-    const prisma = new PrismaClient({ datasources: { db: { url: 'file:' + dbFile } } });
-    const items = await prisma.batchTaskItem.findMany({
-      where: { level: 'CAMPAIGN', platformId: { not: null } },
-      select: { platformId: true, displayName: true },
+    const start = ymd(new Date(Date.now() - days * 86400e3));
+    const r = await api('/api/report/level/campaign', {
+      advertiserId: accId,
+      startDate: start,
+      endDate,
+      page: 1,
+      pageSize: 200,
     });
-    for (const it of items) if (it.platformId) map.set(String(it.platformId), String(it.displayName));
-    await prisma.$disconnect();
-    fs.writeFileSync(cachePath, JSON.stringify(Object.fromEntries(map), null, 1));
+    for (const x of r.rows || []) if (x.campaignId) ids.add(String(x.campaignId));
   } catch (e) {
-    log(`计划名缓存失败：${e.message}`);
+    log(`近 ${days} 天计划 ID 拉取失败：${e.message}`);
   }
-  return map;
+  return [...ids];
 }
 
 async function campaignRows(accId, dateStr) {
@@ -218,17 +300,19 @@ function netHint(msg) {
 }
 
 /** 计划级成本判定（真正的成本结论只下在计划级别，不下在账户级别） */
-function evalCampaignCost(accTag, row, name) {
+function evalCampaignCost(accName, row, name, brief = {}) {
   const out = [];
   const charge = Number(row.charge || 0);
   const act = Number(row.activation || 0);
   const cpa = act > 0 && row.activationCost != null ? Number(row.activationCost) : null;
   const cid = String(row.campaignId || '');
   const stage = stageOf(act);
+  // 最大转化计划没有出价，任何「调价」建议都不成立，只能动预算/素材/开关
+  const priceHint = brief.isMcb ? '降预算 10%~20%' : '降出价 10%';
 
   // 空耗：任何阶段都判（不是成本问题，是完全不转化）
   if (act === 0 && charge >= L.emptySpendCharge) {
-    out.push({ key: `P0-${cid}`, sev: 'YEL', code: 'P0', w: charge, text: `${accTag}「${name}」消耗 ${yuan(charge)} 仍 0 激活 → 建议关停（${L.emptySpendCharge} 元空耗线）` });
+    out.push({ key: `P0-${cid}`, sev: 'YEL', code: 'P0', mcb: !!brief.isMcb, w: charge, text: `「${name}」消耗 ${yuan(charge)} 仍 0 激活 → 建议关停（${L.emptySpendCharge} 元空耗线）` });
     return out;
   }
   if (cpa == null) return out;
@@ -239,63 +323,66 @@ function evalCampaignCost(accTag, row, name) {
   }
   if (stage === 'RAMP') {
     if (cpa > L.cpaRampHard && charge >= L.cpaRampHardMinCharge) {
-      out.push({ key: `P3-${cid}`, sev: 'YEL', code: 'P3', w: charge, text: `${accTag}「${name}」爬坡期成本偏高：CPA ${yuan(cpa)} > ${L.cpaRampHard}（激活 ${act}/${L.rampMaxAct}）→ 再观察到 ${L.rampMaxAct} 个激活，暂不关停` });
+      out.push({ key: `P3-${cid}`, sev: 'YEL', code: 'P3', mcb: !!brief.isMcb, w: charge, text: `「${name}」爬坡期成本偏高：CPA ${yuan(cpa)} > ${L.cpaRampHard}（激活 ${act}/${L.rampMaxAct}）→ 再观察到 ${L.rampMaxAct} 个激活，暂不关停` });
     } else if (cpa > L.cpaRampWarn) {
-      out.push({ key: `P2-${cid}`, sev: 'GOOD', code: 'P2', w: 0, text: `${accTag}「${name}」爬坡期：CPA ${yuan(cpa)}（激活 ${act}），容忍线 ${L.cpaRampWarn}，继续观察` });
+      out.push({ key: `P2-${cid}`, sev: 'GOOD', code: 'P2', mcb: !!brief.isMcb, w: 0, text: `「${name}」爬坡期：CPA ${yuan(cpa)}（激活 ${act}），容忍线 ${L.cpaRampWarn}，继续观察` });
     }
     return out;
   }
   // 成熟期：恢复正常红线
   if (cpa > L.cpaMatureRed && charge >= L.cpaMatureRedMinCharge) {
-    out.push({ key: `P5-${cid}`, sev: 'RED', code: 'P5', w: charge, text: `${accTag}「${name}」成熟期成本超标：CPA ${yuan(cpa)} > ${L.cpaMatureRed}（激活 ${act}，消耗 ${yuan(charge)}）→ 降出价 10% 或关停` });
+    out.push({ key: `P5-${cid}`, sev: 'RED', code: 'P5', mcb: !!brief.isMcb, w: charge, text: `「${name}」成熟期成本超标：CPA ${yuan(cpa)} > ${L.cpaMatureRed}（激活 ${act}，消耗 ${yuan(charge)}）→ ${priceHint}，仍不达标就关停` });
   } else if (cpa > L.cpaMatureWarn) {
-    out.push({ key: `P4-${cid}`, sev: 'YEL', code: 'P4', w: charge, text: `${accTag}「${name}」成熟期成本偏高：CPA ${yuan(cpa)} > ${L.cpaMatureWarn}（激活 ${act}）→ 降出价 10%` });
+    out.push({ key: `P4-${cid}`, sev: 'YEL', code: 'P4', mcb: !!brief.isMcb, w: charge, text: `「${name}」成熟期成本偏高：CPA ${yuan(cpa)} > ${L.cpaMatureWarn}（激活 ${act}）→ ${priceHint}` });
   }
   return out;
 }
 
-function evalAccount(a, budgetYuan, hour, pace) {
+function evalAccount(a, budgetYuan, hour, pace, opts = {}) {
   const alerts = [];
+  const who = a.name || a.tag;
+  const mcb = !!opts.mcb; // 账户主力是最大转化计划 → 不提「出价」
   const expCharge = budgetYuan * pace;
   if (a.error) {
-    alerts.push({ key: `A0-${a.tag}`, sev: 'RED', code: 'A0', text: `${a.tag} 数据拉取失败：${a.error}${netHint(a.error)}` });
+    alerts.push({ key: `A0-${a.id}`, sev: 'RED', code: 'A0', mcb, text: `${who} 数据拉取失败：${a.error}${netHint(a.error)}` });
     return alerts;
   }
   // A5 回传异常（持续判定）
   if (a.bclick >= T.clickNoConvCount && a.activation === 0 && hour >= 10) {
-    const key = `A5-${a.tag}`;
+    const key = `A5-${a.id}`;
     if (!state.firstSeen[key]) state.firstSeen[key] = Date.now();
     const mins = (Date.now() - state.firstSeen[key]) / 60000;
     if (mins >= T.clickNoConvMinutes) {
-      alerts.push({ key, sev: 'RED', code: 'A5', text: `${a.tag} 回传异常：点击 ${a.bclick} 但激活 0，已持续 ${Math.round(mins)} 分钟` });
+      alerts.push({ key, sev: 'RED', code: 'A5', mcb, text: `回传异常：点击 ${a.bclick} 但激活 0，已持续 ${Math.round(mins)} 分钟` });
     }
   } else {
-    delete state.firstSeen[`A5-${a.tag}`];
+    delete state.firstSeen[`A5-${a.id}`];
   }
   // A4 账户级空耗（整户 60 元仍 0 激活才算异常）
   if (a.charge >= L.accountEmptySpendCharge && a.activation === 0) {
-    alerts.push({ key: `A4-${a.tag}`, sev: 'RED', code: 'A4', text: `${a.tag} 全户空耗：消耗 ${yuan(a.charge)} 元仍 0 激活` });
+    alerts.push({ key: `A4-${a.id}`, sev: 'RED', code: 'A4', mcb, text: `全户空耗：消耗 ${yuan(a.charge)} 元仍 0 激活` });
   }
   // A3 账户级成本：只做提示，真正的判定在计划级别（账户里混着老计划，不能一刀切）
   if (stageOf(a.activation) !== 'OBSERVE' && a.cpa != null && a.cpa > L.cpaMatureWarn) {
-    alerts.push({ key: `A3-${a.tag}`, sev: 'YEL', code: 'A3', text: `${a.tag} 账户综合 CPA ${yuan(a.cpa)}（激活 ${a.activation}）——仅提示，成本判定看计划级` });
+    alerts.push({ key: `A3-${a.id}`, sev: 'YEL', code: 'A3', mcb, text: `账户综合 CPA ${yuan(a.cpa)}（激活 ${a.activation}）——仅提示，成本判定看计划级` });
   }
   // A1 / A2 消耗进度（账户没跑起来时不算「滞后」，单列 A1b）
   if (hour >= 12) {
     if (a.charge === 0) {
-      alerts.push({ key: `A1b-${a.tag}`, sev: 'RED', code: 'A1', text: `${a.tag} 全天 0 消耗，计划可能未开启/被拒/出价过低` });
-    } else if (a.charge >= CFG.bidYuan * 3) {
+      alerts.push({ key: `A1b-${a.id}`, sev: 'RED', code: 'A1', mcb, text: `全天 0 消耗：计划可能未开启/审核未过/素材被拒` });
+    } else if (a.charge >= CFG.bidYuan * 3 && budgetYuan > 0) {
       const ratio = a.charge / Math.max(expCharge, 1);
-      if (ratio < T.paceLow) {
-        alerts.push({ key: `A1-${a.tag}`, sev: 'YEL', code: 'A1', text: `${a.tag} 消耗滞后：已花 ${yuan(a.charge)}，按进度应花 ${yuan(expCharge)}（${Math.round(ratio * 100)}%）` });
+      if (ratio < T.paceLow && !mcb) {
+        // 最大转化由系统控速，节奏慢不是异常，也不提任何「加价」——干脆不报
+        alerts.push({ key: `A1-${a.id}`, sev: 'YEL', code: 'A1', mcb, text: `投放节奏偏慢：已花 ${yuan(a.charge)}，按进度应花 ${yuan(expCharge)}（${Math.round(ratio * 100)}%）` });
       }
       if (ratio > T.paceHigh) {
-        alerts.push({ key: `A2-${a.tag}`, sev: 'YEL', code: 'A2', text: `${a.tag} 消耗偏快：已花 ${yuan(a.charge)}，进度应花 ${yuan(expCharge)}（${Math.round(ratio * 100)}%）` });
+        alerts.push({ key: `A2-${a.id}`, sev: 'YEL', code: 'A2', mcb, text: `消耗偏快：已花 ${yuan(a.charge)}，进度应花 ${yuan(expCharge)}（${Math.round(ratio * 100)}%）` });
       }
     }
   }
-  if (hour < T.budgetHitAt && a.charge >= budgetYuan * 0.95) {
-    alerts.push({ key: `A2b-${a.tag}`, sev: 'RED', code: 'A2', text: `${a.tag} 预算将撞线：已花 ${yuan(a.charge)} / ${budgetYuan}，现在才 ${hm()}` });
+  if (hour < T.budgetHitAt && budgetYuan > 0 && a.charge >= budgetYuan * 0.95) {
+    alerts.push({ key: `A2b-${a.id}`, sev: 'RED', code: 'A2', mcb, text: `计划池将用尽：已花 ${yuan(a.charge)} / ${yuan(budgetYuan)}，现在才 ${hm()}` });
   }
   return alerts;
 }
@@ -311,6 +398,8 @@ function allocOf(accId) {
 
 function evalTotal(metrics, budgets, hour, pace) {
   const alerts = [];
+  // 单账户不存在「跨户调拨」这回事，合计口径会和账户口径重复（用户明确要求别再造一个总预算）
+  if (CFG.accounts.length < 2) return alerts;
   const TOTAL = Number(CFG.totalBudgetYuan || CFG.dailyBudgetYuan * CFG.accounts.length);
   const ok = metrics.filter((m) => !m.error);
   if (!ok.length) return alerts;
@@ -321,14 +410,14 @@ function evalTotal(metrics, budgets, hour, pace) {
   if (hour >= 12 && total >= CFG.bidYuan * 3) {
     const ratio = total / Math.max(exp, 1);
     if (ratio > T.paceHigh) {
-      alerts.push({ key: 'AT-fast', sev: 'YEL', code: 'A2', text: `两户合计消耗偏快：${yuan(total)} / 进度应花 ${yuan(exp)}（${Math.round(ratio * 100)}%）· 总预算 ${TOTAL}` });
+      alerts.push({ key: 'AT-fast', sev: 'YEL', code: 'A2', text: `合计消耗偏快：${yuan(total)} / 进度应花 ${yuan(exp)}（${Math.round(ratio * 100)}%）· 总预算 ${TOTAL}` });
     } else if (ratio < T.paceLow) {
-      alerts.push({ key: 'AT-slow', sev: 'YEL', code: 'A1', text: `两户合计消耗滞后：${yuan(total)} / 进度应花 ${yuan(exp)}（${Math.round(ratio * 100)}%）· 总预算 ${TOTAL}` });
+      alerts.push({ key: 'AT-slow', sev: 'YEL', code: 'A1', text: `合计消耗滞后：${yuan(total)} / 进度应花 ${yuan(exp)}（${Math.round(ratio * 100)}%）· 总预算 ${TOTAL}` });
     }
   }
   // T2 合计撞线
   if (hour < T.budgetHitAt && total >= TOTAL * 0.95) {
-    alerts.push({ key: 'AT-hit', sev: 'RED', code: 'A2', text: `两户合计预算将撞线：${yuan(total)} / ${TOTAL}，现在才 ${hm()}——要放量得加总预算，单户调拨已无用` });
+    alerts.push({ key: 'AT-hit', sev: 'RED', code: 'A2', text: `合计预算将撞线：${yuan(total)} / ${TOTAL}，现在才 ${hm()}——要放量得加总预算，单户调拨已无用` });
   }
 
   // T3 单户撞线但合计还有额度 → 建议调拨（不是异常，是结构问题）
@@ -339,8 +428,8 @@ function evalTotal(metrics, budgets, hour, pace) {
       const otherCharge = others.reduce((s, x) => s + (x.charge || 0), 0);
       const slack = Math.max(0, Math.round((TOTAL - total) / 100) * 100);
       alerts.push({
-        key: `AT-perhit-${m.tag}`, sev: 'RED', code: 'A7',
-        text: `${m.tag} 单户额度将用尽（${yuan(m.charge)}/${b}），但两户合计只花了 ${yuan(total)}/${TOTAL}（另一户 ${yuan(otherCharge)}）→ 可把额度从另一户调 ${slack} 元过来，不用停投`,
+        key: `AT-perhit-${m.id}`, sev: 'RED', code: 'A7',
+        text: `${m.name || m.tag} 单户额度将用尽（${yuan(m.charge)}/${b}），但合计只花了 ${yuan(total)}/${TOTAL}（另一户 ${yuan(otherCharge)}）→ 可把额度从另一户调 ${slack} 元过来，不用停投`,
       });
     }
   }
@@ -358,45 +447,48 @@ function evalTotal(metrics, budgets, hour, pace) {
       const suggest = ok.map((m) => {
         const raw = total > 0 ? ((m.charge || 0) / total) * TOTAL : TOTAL / ok.length;
         const v = Math.min(4500, Math.max(500, Math.round(raw / 100) * 100));
-        return { tag: m.tag, v };
+        return { name: m.name || m.tag, v };
       });
       const sum = suggest.reduce((s, x) => s + x.v, 0);
-      if (sum !== TOTAL) suggest[0].v += TOTAL - sum; // 凑齐 5000
+      if (sum !== TOTAL) suggest[0].v += TOTAL - sum; // 凑齐合计
       alerts.push({
         key: 'AT-alloc', sev: 'YEL', code: 'A7',
-        text: `预算切分与消耗结构不匹配：${top.m.tag} 消耗占 ${Math.round(top.spendShare * 100)}%、额度只占 ${Math.round(top.allocShare * 100)}%（${bottom.m.tag} 反之）→ 建议调成 ${suggest.map((s) => `${s.tag} ${s.v}`).join(' / ')}（合计仍 ${TOTAL}）`,
+        text: `预算切分与消耗结构不匹配：${top.m.name || top.m.tag} 消耗占 ${Math.round(top.spendShare * 100)}%、额度只占 ${Math.round(top.allocShare * 100)}%（${bottom.m.name || bottom.m.tag} 反之）→ 建议调成 ${suggest.map((s) => `${s.name} ${s.v}`).join(' / ')}（合计仍 ${TOTAL}）`,
       });
     }
   }
   return alerts;
 }
 
-function evalCreatives(accTag, rows, nameMap) {
+function evalCreatives(accName, rows, nameMap, campMap = new Map()) {
   const alerts = [];
   const hour = now().getHours();
   for (const r of rows) {
     const cid = String(r.creativeId || '');
-    const name = String(nameMap.get(cid) || r.creativeName || r.name || cid).slice(0, 26);
+    const name = String(nameMap.get(cid) || r.creativeName || r.name || cid).slice(0, 30);
     const charge = Number(r.charge || 0);
     const act = Number(r.activation || 0);
     const cpa = act > 0 && r.activationCost != null ? Number(r.activationCost) : null;
     const show = Number(r.show || 0);
     const ctr = r.actionRatio != null ? Number(r.actionRatio) : null;
+    const brief = campMap.get(String(r.campaignId || '')) || {};
+    const mcb = !!brief.isMcb;
 
     if (charge >= L.emptySpendCharge && act === 0) {
-      alerts.push({ key: `C1-${cid}`, sev: 'YEL', code: 'C1', text: `${accTag}「${name}」消耗 ${yuan(charge)} 仍 0 激活 → 建议关停（${L.emptySpendCharge} 元空耗线）`, w: charge });
+      alerts.push({ key: `C1-${cid}`, sev: 'YEL', code: 'C1', mcb, w: charge, text: `「${name}」消耗 ${yuan(charge)} 仍 0 激活 → 关掉这条创意` });
     } else if (charge >= L.emptySpendCharge && cpa != null && cpa > L.cpaRampHard) {
-      alerts.push({ key: `C2-${cid}`, sev: 'YEL', code: 'C2', text: `${accTag}「${name}」消耗 ${yuan(charge)}，CPA ${yuan(cpa)} 超爬坡容忍线 → 建议关停`, w: charge });
+      alerts.push({ key: `C2-${cid}`, sev: 'YEL', code: 'C2', mcb, w: charge, text: `「${name}」消耗 ${yuan(charge)}，CPA ${yuan(cpa)} 超爬坡容忍线 → 关掉这条创意` });
     }
     // 曝光不足：只在「已经在花钱却拿不到量」时才算问题，避免历史死创意刷屏
     if (hour >= T.c3MinHour && charge >= 3 && show > 0 && show < T.c3MinShow) {
-      alerts.push({ key: `C3-${cid}`, sev: 'YEL', code: 'C3', text: `${accTag}「${name}」曝光不足：花 ${yuan(charge)} 只拿到 ${show} 展示 → 提价 20% 或换素材`, w: charge });
+      const hint = mcb ? '最大转化无出价，换封面/首 3 秒或换素材' : '提价 20% 或换素材';
+      alerts.push({ key: `C3-${cid}`, sev: 'YEL', code: 'C3', mcb, w: charge, text: `「${name}」曝光不足：花 ${yuan(charge)} 只拿到 ${show} 展示 → ${hint}` });
     }
     if (show >= T.c4MinShow && ctr != null && ctr < T.c4MaxCtr) {
-      alerts.push({ key: `C4-${cid}`, sev: 'YEL', code: 'C4', text: `${accTag}「${name}」点击率 ${pct(ctr)} < ${pct(T.c4MaxCtr)} → 素材钩子弱，停止复投`, w: charge });
+      alerts.push({ key: `C4-${cid}`, sev: 'YEL', code: 'C4', mcb, w: charge, text: `「${name}」点击率 ${pct(ctr)} < ${pct(T.c4MaxCtr)} → 素材钩子弱，进淘汰池` });
     }
     if (act >= T.c5MinAct && cpa != null && cpa <= T.c5MaxCpa) {
-      alerts.push({ key: `C5-${cid}`, sev: 'GOOD', code: 'C5', text: `${accTag}「${name}」高潜：CPA ${yuan(cpa)}（激活 ${act}）→ 今晚复投两户`, w: 0 });
+      alerts.push({ key: `C5-${cid}`, sev: 'GOOD', code: 'C5', mcb, w: 0, text: `「${name}」高潜：CPA ${yuan(cpa)}（激活 ${act}）→ 值得复投放大` });
     }
   }
   return alerts;
@@ -404,70 +496,188 @@ function evalCreatives(accTag, rows, nameMap) {
 
 /* ---------------- 卡片 ---------------- */
 const SEV_ICON = { RED: '🔴', YEL: '🟡', GOOD: '🟢' };
-const CODE_ACTION = {
-  A0: '检查后端 7801 是否在线 / 授权是否失效',
-  A1: '查审核与出价：新素材可提到 9 元（上限），复投组保持 8',
-  A2: '降出价（基准 8 元）/ 关停 CPA 最差创意；合计要放量再加总预算',
-  A3: '账户综合成本仅作参考，具体看计划级判定',
-  A4: '整户 0 激活：先查监测链接回传，再查落地页',
-  A5: '核监测链接 channel_tag 与回调签名，先确认不是回传问题',
-  A6: '重新授权 / 充值',
-  P0: '计划级空耗（36 元 0 激活）→ 关停该计划，素材转投他计划',
-  P2: '爬坡期成本在容忍范围内，继续观察，别动',
-  P3: '爬坡期超 2.5×：不关停，等到 20 个激活再看；可小幅降出价 5%',
-  P4: '成熟期超 1.5×：出价降 10%',
-  P5: '成熟期超红线：降出价 10%，仍不达标就关停',
-  C1: '关停该创意（消耗已超 36 元且 0 激活，属空耗不属成本）',
-  C2: '关停该创意（CPA 已超爬坡容忍线且消耗 ≥36 元）',
-  C3: '新素材可提到 9 元抢量，跑量后回调 8 元',
-  C4: '进淘汰池，不再复投；同素材换钩子文案再试',
-  C5: '今晚复投到两户新计划，主力吃量',
-  A7: '按建议调拨两户额度（合计 5000 不变）——不是异常，别急着停投',
-};
 
-function metricsLine(a, alloc) {
-  if (a.error) return `${a.tag} · 数据异常（${a.error.slice(0, 40)}）`;
-  const b = Number(alloc || allocOf(a.id)) || CFG.dailyBudgetYuan;
-  return `${a.tag} · 消耗 ${yuan(a.charge)}/额度 ${b}（${((a.charge / b) * 100).toFixed(1)}%）· 激活 ${a.activation} · CPA ${a.cpa == null ? '—' : yuan(a.cpa)} · 展示 ${a.show} · 点击率 ${pct(a.ctr)}`;
+/** 动作建议：最大转化（MCB）没有出价，任何「调价」都是胡说 */
+function actionOf(a) {
+  const mcb = !!a.mcb;
+  switch (a.code) {
+    case 'A0': return '先确认后端 7801 在线、授权未失效';
+    case 'A1': return mcb ? '最大转化不看出价：查审核与素材质量；要抢量只能加计划预算或换素材' : '新素材出价可提到 9 元（上限），复投保持 8';
+    case 'A2': return mcb ? '消耗偏快：盯住 CPA，超线就下调计划预算' : '降出价（基准 8 元）或关停 CPA 最差的创意';
+    case 'A3': return '账户综合成本只作参考，结论看计划级';
+    case 'A4': return '整户 0 激活：先查监测链接回传，再查落地页';
+    case 'A5': return '核 channel_tag 与回调签名，先排除回传问题';
+    case 'A6': return '重新授权';
+    case 'A7': return '按建议调拨额度（合计不变）';
+    case 'A8': return '新计划被暂停已自动重开；若是你手动暂停的，回复我加进豁免名单';
+    case 'P0': return '关停该计划，素材转投其他计划';
+    case 'P2': return '在容忍范围内，别动';
+    case 'P3': return mcb ? '不关停，等到 20 个激活再看；急可下调计划预算 5%' : '不关停，等到 20 个激活再看；可降出价 5%';
+    case 'P4': return mcb ? '成本偏高：计划预算降 10%~20%' : '成本偏高：出价降 10%';
+    case 'P5': return mcb ? '成本超红线：计划预算降 20%，仍不达标就关停' : '成本超红线：出价降 10%，仍不达标就关停';
+    case 'C1': return '关掉这条创意（0 激活空耗）';
+    case 'C2': return '关掉这条创意（CPA 超爬坡容忍线）';
+    case 'C3': return mcb ? '最大转化无出价：换封面 / 前 3 秒，或直接换素材' : '提价 20% 抢量，跑起来后回调 8 元';
+    case 'C4': return '进淘汰池不再复投；同素材换钩子再试';
+    case 'C5': return '复投放大，主力吃量';
+    default: return null;
+  }
 }
 
-function totalLine(metrics) {
-  const ok = metrics.filter((m) => !m.error);
-  const TOTAL = Number(CFG.totalBudgetYuan || CFG.dailyBudgetYuan * CFG.accounts.length);
-  const total = ok.reduce((s, m) => s + (m.charge || 0), 0);
-  const act = ok.reduce((s, m) => s + (m.activation || 0), 0);
-  return `**合计 ${yuan(total)}/${TOTAL}（${((total / TOTAL) * 100).toFixed(1)}%）· 激活 ${act} · 均价 ${act ? yuan(total / act) : '—'}**`;
+/** 计划所处阶段（按激活数，不看挂了多久） */
+function stageText(act, charge) {
+  if (!act && !charge) return '还没起量（无消耗）';
+  if (act < L.observeMaxAct) return `学习期：激活 ${act}/${L.observeMaxAct} → 成本暂不判定`;
+  if (act < L.rampMaxAct) return `爬坡期：激活 ${act}/${L.rampMaxAct} → 容忍 CPA ${L.cpaRampWarn}~${L.cpaRampHard}`;
+  return `成熟期：激活 ${act} → 红线 CPA ${L.cpaMatureWarn}/${L.cpaMatureRed}`;
 }
 
-function buildWatchCard(alerts, metrics, observeCount = 0) {
+function planBlock(plans) {
+  const out = [];
+  plans.forEach((p, i) => {
+    const b = p.brief;
+    const row = p.row || {};
+    const act = Number(row.activation || 0);
+    const charge = Number(row.charge || 0);
+    const cpa = act > 0 && row.activationCost != null ? Number(row.activationCost) : null;
+    const mode = b.isMcb ? '最大转化（无出价）' : `oCPX${b.bidYuan ? ' ' + yuan(b.bidYuan) + ' 元' : '（无出价）'}`;
+    out.push(`**${i + 1}. ${b.name}**`);
+    out.push(
+      `　${b.putStatusText}｜${mode}｜日预算 ${b.dayBudgetYuan ? Math.round(b.dayBudgetYuan) + ' 元' : '不限'}｜消耗 ${yuan(charge)}｜激活 ${act}｜CPA ${cpa == null ? '—' : yuan(cpa)}｜展示 ${Number(row.show || 0)}｜CTR ${pct(row.actionRatio)}`,
+    );
+    out.push(`　${stageText(act, charge)}`);
+  });
+  return out;
+}
+
+function accountBlock(m, planBudget, acctBudget) {
+  if (m.error) return [`**${m.name || m.tag}（${m.id}）**`, `　数据异常：${m.error.slice(0, 60)}`];
+  const used = planBudget > 0 ? (m.charge / planBudget) * 100 : 0;
+  // 短显示名下不再重复挂 ID（标题已经够短，账户名放在末行追溯）
+  const shorted = !!(m.fullName && m.name && m.name !== m.fullName);
+  const head = shorted ? `**${m.name}**` : `**${m.name || m.tag}（${m.id}）**`;
+  const out = [
+    head,
+    `　消耗 ${yuan(m.charge)} / ${planBudget > 0 ? Math.round(planBudget) + `（${used.toFixed(1)}%）` : '—'}｜激活 ${m.activation}｜CPA ${m.cpa == null ? '—' : yuan(m.cpa)}｜展示 ${m.show}｜CTR ${pct(m.ctr)}${m.cpm == null ? '' : `｜千展 ${yuan(m.cpm)}`}`,
+    `　账户日预算 ${Math.round(acctBudget)} 元（外层上限）${shorted ? `｜${m.fullName}` : ''}`,
+  ];
+  return out;
+}
+
+/** 摘要一句：保留名字，去掉「→ 动作」部分 */
+function shortOf(text) {
+  const t = String(text).trim();
+  const cut = t.split('→')[0].trim();
+  return cut.length > 62 ? cut.slice(0, 62) + '…' : cut;
+}
+
+/** 钉钉 Markdown 单换行不生效，必须空行分段；顺手丢掉占位空行，避免出现连续多空行 */
+const cardJoin = (lines) => lines.filter((x) => x !== '').join('\n\n');
+
+/** 同类告警合并：8 条「曝光不足」堆在一起只会让人抓不到重点 */
+function compactTodo(todo) {
+  const byCode = new Map();
+  for (const a of todo) {
+    const g = byCode.get(a.code) || [];
+    g.push(a);
+    byCode.set(a.code, g);
+  }
+  const out = [];
+  for (const [, list] of byCode) {
+    if (list[0].code === 'C3' && list.length >= 3) {
+      const charge = list.reduce((s, a) => s + (a.w || 0), 0);
+      out.push({
+        ...list[0],
+        key: 'C3-group',
+        text: `${list.length} 条创意曝光不足（合计花 ${yuan(charge)}，单条展示都不到 ${T.c3MinShow}）→ 换封面 / 前 3 秒，或直接换素材`,
+      });
+    } else {
+      out.push(...list);
+    }
+  }
+  return out;
+}
+
+function buildWatchCard(alerts, ctx) {
+  const { metrics, plans, planBudget, acctBudget, observeCount = 0 } = ctx;
   const reds = alerts.filter((x) => x.sev === 'RED');
   const yels = alerts.filter((x) => x.sev === 'YEL');
   const goods = alerts.filter((x) => x.sev === 'GOOD');
-  const head = `### 【快手盯盘】${md()} ${hm()} · 🔴${reds.length} 🟡${yels.length}${goods.length ? ` 🟢${goods.length}` : ''}`;
-  const lines = [head, ''];
-  lines.push(totalLine(metrics));
-  for (const m of metrics) lines.push(metricsLine(m));
-  if (observeCount > 0) lines.push(`_观察期计划 ${observeCount} 条（激活 <${L.observeMaxAct}，成本不判定）_`);
-  if (alerts.length) {
-    lines.push('', '---');
-    for (const a of [...reds, ...yels, ...goods]) lines.push(`${SEV_ICON[a.sev]} ${a.text}`);
-    const actions = [...new Set(alerts.filter((a) => a.sev !== 'GOOD').map((a) => CODE_ACTION[a.code]).filter(Boolean))];
-    if (actions.length) {
-      lines.push('', '**建议动作**');
-      for (const x of actions) lines.push(`· ${x}`);
-    }
+  const accNames = metrics.map((m) => m.name || m.tag).filter(Boolean);
+  const title = accNames.length === 1 ? accNames[0] : '多账户';
+  // 待处理先合并，badge 用合并后的数量（否则「8 项观察」下面只有 1 条，读起来对不上）
+  const todo = compactTodo([...reds, ...yels]);
+  const badge = [
+    todo.some((a) => a.sev === 'RED') ? `🔴 ${todo.filter((a) => a.sev === 'RED').length} 项待处理` : '✅ 无红警',
+    yels.length ? `🟡 ${todo.filter((a) => a.sev === 'YEL').length} 项观察` : '',
+    goods.length ? `🟢 ${goods.length} 项提示` : '',
+  ].filter(Boolean);
+  const lines = [`### ${title} · 盯盘 ${md()} ${hm()}`, `**${badge.join('　｜　')}**`, ''];
+
+  const totalCharge = metrics.reduce((s, m) => s + (m.charge || 0), 0);
+  const totalAct = metrics.reduce((s, m) => s + (m.activation || 0), 0);
+  const cpaAll = totalAct > 0 ? totalCharge / totalAct : null;
+  const poolAll = Object.values(planBudget).reduce((s, v) => s + Number(v || 0), 0);
+  const allObserve = plans.length > 0 && plans.every((p) => Number((p.row || {}).activation || 0) < L.observeMaxAct);
+  const stat = `花 ${yuan(totalCharge)}/${poolAll > 0 ? Math.round(poolAll) : '—'}（${poolAll > 0 ? ((totalCharge / poolAll) * 100).toFixed(1) : '0'}%）· 激活 ${totalAct} · 均价 ${cpaAll == null ? '—' : yuan(cpaAll)}${allObserve ? '（学习期，成本暂不判）' : ''}`;
+
+  const verdict = todo.length
+    ? `**结论**：${todo.some((a) => a.sev === 'RED') ? '有红警' : '无红警'}。${stat}。${todo.length} 项待处理，最要紧的：${shortOf(todo[0].text)}`
+    : `**结论**：${stat}，各项正常`;
+  lines.push(verdict, '', '---', '');
+
+  // 账户 + 计划
+  for (const m of metrics) lines.push(...accountBlock(m, planBudget[m.id] || 0, acctBudget[m.id] || 0));
+  if (metrics.length > 1) {
+    lines.push(`**合计**：消耗 ${yuan(totalCharge)}　激活 ${totalAct}　均价 ${cpaAll == null ? '—' : yuan(cpaAll)}`);
+  }
+  lines.push('');
+  const allPlans = [...plans].sort((a, b) => Number((b.row || {}).charge || 0) - Number((a.row || {}).charge || 0));
+  if (allPlans.length) {
+    lines.push(`**计划 · ${allPlans.length} 条**`);
+    lines.push(...planBlock(allPlans));
+  } else {
+    lines.push('**计划**：今日无投放中的计划');
+  }
+  if (observeCount > 0 && !allObserve) lines.push(`_其中 ${observeCount} 条在学习期（激活 <${L.observeMaxAct}），成本不下结论_`);
+
+  // 待处理（todo 已在上方合并好）
+  if (todo.length) {
+    lines.push('', '---', '', `**待处理 · ${todo.length} 项**`);
+    todo.forEach((a, i) => lines.push(`${i + 1}. ${SEV_ICON[a.sev]} ${a.text}`));
+  }
+  if (goods.length) {
+    lines.push('', `**提示 · ${goods.length} 项**`);
+    for (const a of goods) lines.push(`· ${SEV_ICON[a.sev]} ${a.text}`);
+  }
+
+  // 建议：只针对待处理项，去重后最多 4 条，避免「提示」类凑数
+  const actions = [];
+  for (const a of todo) {
+    const t = actionOf(a);
+    if (t && !actions.includes(t)) actions.push(t);
+  }
+  if (actions.length) {
+    lines.push('', '**建议动作**');
+    actions.slice(0, 4).forEach((x) => lines.push(`· ${x}`));
   }
   lines.push('', `[打开工作台](http://127.0.0.1:7801)`);
-  return lines.join('\n');
+  return cardJoin(lines);
 }
 
-function buildHeartbeatCard(metrics) {
+function buildHeartbeatCard(metrics, ctx = {}) {
+  const { planBudget = {}, acctBudget = {}, plans = [] } = ctx;
   const total = metrics.reduce((s, m) => s + (m.charge || 0), 0);
   const act = metrics.reduce((s, m) => s + (m.activation || 0), 0);
-  const cpa = act > 0 ? total / act : null;
-  const lines = [`### 【快手盯盘】${md()} ${hm()} · 平稳`, '', totalLine(metrics), `合计激活 ${act} · 均价 ${cpa == null ? '—' : yuan(cpa)}`];
-  for (const m of metrics) lines.push(metricsLine(m));
-  return lines.join('\n');
+  const lines = [`### 盼之电竞 · 盯盘 ${md()} ${hm()}`, '**✅ 无异常（心跳）**', ''];
+  for (const m of metrics) lines.push(...accountBlock(m, planBudget[m.id] || 0, acctBudget[m.id] || 0));
+  if (metrics.length > 1) lines.push(`**合计**：消耗 ${yuan(total)}　激活 ${act}　均价 ${act ? yuan(total / act) : '—'}`);
+  if (plans.length) {
+    lines.push('', `**计划 · ${plans.length} 条**`);
+    lines.push(...planBlock(plans));
+  }
+  lines.push('', `[打开工作台](http://127.0.0.1:7801)`);
+  return cardJoin(lines);
 }
 
 /* ---------------- 推送 ---------------- */
@@ -488,9 +698,11 @@ function pushDingtalk(card) {
     console.log('--- 未推送（dry/enabled=false）---');
     return { ok: true, skipped: true };
   }
+  // 优先用 openConversationId：稳定 ID 不走群名解析，避免重名/改名推错群
+  const target = CFG.dingtalk.groupId || CFG.dingtalk.group;
   const res = spawnSync(
     process.execPath,
-    [DWS_JS, 'chat', '+send-to-group', '--group', CFG.dingtalk.group, '--content', card, '--yes', '--format', 'json'],
+    [DWS_JS, 'chat', '+send-to-group', '--group', target, '--content', card, '--yes', '--format', 'json'],
     { encoding: 'utf-8', timeout: 60000 },
   );
   const out = ((res.stdout || '') + (res.stderr || '')).trim();
@@ -613,25 +825,77 @@ async function watch() {
   const date = ymd();
   const pace = paceExpected(hour);
   const metrics = await accountMetrics(date);
-  const budgets = {};
-  for (const a of CFG.accounts) budgets[a.id] = await budgetOf(a.id);
+  // 报告里一律用账户名，不用内部代号
+  const names = await accountNameMap();
+  applyAccountNames(metrics, names);
+
+  const acctBudget = {};
+  for (const a of CFG.accounts) acctBudget[a.id] = await budgetOf(a.id);
 
   let alerts = [];
-  // 预算动态调拨：每户额度 ≥ 2×消耗（利用率 ≤50%），两户合计 5000 不变
-  try {
-    const budgetActs = await autoBudget.rebalance(metrics, budgets, { hour, dry: DRY });
-    if (budgetActs.length) {
-      for (const a of CFG.accounts) budgets[a.id] = await budgetOf(a.id);
-      for (const b of budgetActs) {
-        alerts.push({ key: `AB-${b.tag}`, sev: 'GOOD', code: 'A7', text: `${b.tag} 日预算已调 ${b.from} → ${b.to} 元（${b.why}）` });
+  // 预算动态调拨只在多户时才有意义（单户没有「互倒」这回事，别去动人家预算）
+  if (CFG.accounts.length > 1) {
+    try {
+      const budgetActs = await autoBudget.rebalance(metrics, acctBudget, { hour, dry: DRY });
+      if (budgetActs.length) {
+        for (const a of CFG.accounts) acctBudget[a.id] = await budgetOf(a.id);
+        for (const b of budgetActs) {
+          alerts.push({ key: `AB-${b.tag}`, sev: 'GOOD', code: 'A7', text: `${b.tag} 日预算已调 ${b.from} → ${b.to} 元（${b.why}）` });
+        }
       }
+    } catch (e) {
+      log(`预算调拨失败：${e.message}`);
     }
-  } catch (e) {
-    log(`预算调拨失败：${e.message}`);
   }
-  for (const m of metrics) alerts = alerts.concat(evalAccount(m, budgets[m.id] || CFG.dailyBudgetYuan, hour, pace));
-  // 两户合计预算 5000（可调拨）：进度 / 撞线 / 结构失衡
-  alerts = alerts.concat(evalTotal(metrics, budgets, hour, pace));
+
+  // 计划层：拉计划清单（本地库 + 今日有消耗）→ 名称/预算/出价方式，再判定成本
+  const plans = [];
+  const planBudget = {};
+  let observeCount = 0;
+  for (const acc of CFG.accounts) {
+    const accName = acc.name || names.get(String(acc.id)) || acc.tag;
+    let rows = [];
+    try {
+      rows = await campaignRows(acc.id, date);
+    } catch (e) {
+      alerts.push({ key: `A0p-${acc.id}`, sev: 'YEL', code: 'A0', text: `${accName} 计划数据拉取失败：${String(e.message).slice(0, 120)}${netHint(e.message)}` });
+    }
+    // 计划清单：今日报表 + 近 3 天报表（含今天零消耗但仍在投的计划）+ 本地任务库
+    const briefs = await loadCampaignBrief(acc.id, [...rows.map((r) => r.campaignId), ...(await recentCampaignIds(acc.id, 3))]);
+    const rowMap = new Map(rows.map((r) => [String(r.campaignId), r]));
+
+    // 计划池 = 在投计划日预算之和（账户预算是外层上限，不是今天能花完的钱）
+    let pool = 0;
+    for (const b of briefs.values()) if (b.putStatus !== 2 && b.dayBudgetYuan > 0) pool += b.dayBudgetYuan;
+    planBudget[acc.id] = pool;
+
+    for (const b of briefs.values()) plans.push({ brief: b, row: rowMap.get(b.id) || null, accId: acc.id });
+    // 报表里有、本地库没有的计划（手建的），照样列出来
+    for (const r of rows) {
+      if (briefs.has(String(r.campaignId))) continue;
+      const act = Number(r.activation || 0);
+      if (Number(r.charge || 0) <= 0) continue;
+      plans.push({
+        accId: acc.id,
+        row: r,
+        brief: { id: String(r.campaignId), name: `计划${String(r.campaignId).slice(-6)}`, putStatus: 1, putStatusText: '投放中', dayBudgetYuan: 0, bidYuan: 0, bidType: null, isMcb: false },
+      });
+    }
+
+    for (const r of rows) {
+      const act = Number(r.activation || 0);
+      if (Number(r.charge || 0) > 0 && stageOf(act) === 'OBSERVE') observeCount += 1;
+      const brief = briefs.get(String(r.campaignId)) || {};
+      const cname = brief.name || `计划${String(r.campaignId).slice(-6)}`;
+      alerts = alerts.concat(evalCampaignCost(accName, r, cname, brief));
+    }
+    // 账户进度按计划池判定（不是账户预算）
+    const m = metrics.find((x) => String(x.id) === String(acc.id));
+    const hasMcb = [...briefs.values()].some((b) => b.isMcb && b.putStatus !== 2);
+    if (m) alerts = alerts.concat(evalAccount(m, pool || acctBudget[acc.id] || 0, hour, pace, { mcb: hasMcb }));
+  }
+  // 多户才有合计口径
+  alerts = alerts.concat(evalTotal(metrics, acctBudget, hour, pace));
 
   // 授权状态
   const grants = await grantsStatus();
@@ -643,40 +907,26 @@ async function watch() {
     }
   }
 
-  // 计划层：成本判定下放到这里（账户级只做提示）
-  const cnameMap = await loadCampaignNames();
-  let observeCount = 0;
-  for (const acc of CFG.accounts) {
-    try {
-      const rows = await campaignRows(acc.id, date);
-      for (const r of rows) {
-        const act = Number(r.activation || 0);
-        if (Number(r.charge || 0) > 0 && stageOf(act) === 'OBSERVE') observeCount += 1;
-        const cname = cnameMap.get(String(r.campaignId)) || `计划${String(r.campaignId).slice(-6)}`;
-        alerts = alerts.concat(evalCampaignCost(acc.tag, r, cname));
-      }
-    } catch (e) {
-      alerts.push({ key: `A0p-${acc.tag}`, sev: 'YEL', code: 'A0', text: `${acc.tag} 计划数据拉取失败：${String(e.message).slice(0, 120)}${netHint(e.message)}` });
-    }
-  }
-
   // 创意层
   const nameMaps = {};
   for (const acc of CFG.accounts) nameMaps[acc.id] = await creativeNameMap(acc.id);
   const perAccount = [];
   for (const acc of CFG.accounts) {
+    const accName = acc.name || names.get(String(acc.id)) || acc.tag;
+    const campMap = new Map();
+    for (const p of plans) if (String(p.accId) === String(acc.id)) campMap.set(String(p.brief.id), p.brief);
     const pa = { acc, creativeRows: [], unitRows: [] };
     try {
       pa.creativeRows = await creativeRows(acc.id, date);
-      alerts = alerts.concat(evalCreatives(acc.tag, pa.creativeRows, nameMaps[acc.id]));
+      alerts = alerts.concat(evalCreatives(accName, pa.creativeRows, nameMaps[acc.id], campMap));
     } catch (e) {
-      alerts.push({ key: `A0c-${acc.tag}`, sev: 'YEL', code: 'A0', text: `${acc.tag} 创意数据拉取失败：${String(e.message).slice(0, 120)}` });
+      alerts.push({ key: `A0c-${acc.id}`, sev: 'YEL', code: 'A0', text: `${accName} 创意数据拉取失败：${String(e.message).slice(0, 120)}` });
     }
     try {
       const ju = await api('/api/report/level/unit', { advertiserId: acc.id, startDate: date, endDate: date, page: 1, pageSize: 200 });
       pa.unitRows = ju.rows || [];
     } catch (e) {
-      log(`${acc.tag} 组数据拉取失败（不影响告警）：${e.message}`);
+      log(`${accName} 组数据拉取失败（不影响告警）：${e.message}`);
     }
     perAccount.push(pa);
   }
@@ -731,6 +981,7 @@ async function watch() {
 
   let card;
   let pushed = false;
+  const ctx = { metrics, plans, planBudget, acctBudget, observeCount };
   if (reds.length || yels.length || goods.length) {
     const fresh = dedupe([...reds, ...yels, ...goods]);
     if (fresh.length === 0) {
@@ -738,13 +989,13 @@ async function watch() {
       saveState();
       return;
     }
-    card = buildWatchCard(fresh, metrics, observeCount);
+    card = buildWatchCard(fresh, ctx);
     const r = pushDingtalk(card);
     pushed = !r.skipped;
     console.log(card);
     if (r.out) console.log('\n[dws] ' + r.out.replace(/\s+/g, ' ').slice(0, 300));
   } else if (CFG.heartbeat && now().getMinutes() < 30 && hour % 2 === 0) {
-    card = buildHeartbeatCard(metrics);
+    card = buildHeartbeatCard(metrics, ctx);
     const r = pushDingtalk(card);
     pushed = !r.skipped;
     console.log(card);
@@ -761,6 +1012,36 @@ async function daily() {
   const y = new Date(today.getTime() - 86400000);
   const yStr = ymd(y);
   const metrics = await accountMetrics(yStr);
+  const names = await accountNameMap();
+  applyAccountNames(metrics, names);
+
+  // 昨日计划明细：名称/出价方式/预算 + 实际消耗与转化
+  const plans = [];
+  const planBudget = {};
+  const acctBudget = {};
+  for (const acc of CFG.accounts) {
+    acctBudget[acc.id] = await budgetOf(acc.id);
+    let rows = [];
+    try {
+      rows = await campaignRows(acc.id, yStr);
+    } catch (e) {
+      log(`昨日计划数据拉取失败：${e.message}`);
+    }
+    const briefs = await loadCampaignBrief(acc.id, [...rows.map((r) => r.campaignId), ...(await recentCampaignIds(acc.id, 7))]);
+    let pool = 0;
+    for (const b of briefs.values()) if (b.dayBudgetYuan > 0) pool += b.dayBudgetYuan;
+    planBudget[acc.id] = pool;
+    const rowMap = new Map(rows.map((r) => [String(r.campaignId), r]));
+    for (const b of briefs.values()) plans.push({ accId: acc.id, brief: b, row: rowMap.get(b.id) || null });
+    for (const r of rows) {
+      if (briefs.has(String(r.campaignId)) || Number(r.charge || 0) <= 0) continue;
+      plans.push({
+        accId: acc.id,
+        row: r,
+        brief: { id: String(r.campaignId), name: `计划${String(r.campaignId).slice(-6)}`, putStatus: 1, putStatusText: '—', dayBudgetYuan: 0, bidYuan: 0, isMcb: false },
+      });
+    }
+  }
 
   // 近 7 天素材榜（罗盘全账户共享素材库，带名称）
   let mats = [];
@@ -796,34 +1077,81 @@ async function daily() {
 
   const total = metrics.reduce((s, m) => s + (m.charge || 0), 0);
   const act = metrics.reduce((s, m) => s + (m.activation || 0), 0);
-  const lines = [
-    `### 【快手日报】${md(y)} 复盘 + 今日基建`,
-    '',
-    `合计消耗 ${yuan(total)} 元 · 激活 ${act} · 均价 ${act ? yuan(total / act) : '—'}`,
-  ];
-  for (const m of metrics) lines.push(metricsLine(m));
-  lines.push('', '---', '**今日复投池（CPA ≤ 11，昨日/近 7 天达标）**');
-  if (repool.length) repool.forEach((m, i) => lines.push(`${i + 1}. ${m.name} · 消耗 ${yuan(m.charge)} · EXP ${m.activation} · CPA ${yuan(m.cpa)}`));
-  else lines.push('· 暂无达标素材，今日以测新为主');
-  if (kill.length) {
-    lines.push('', '**建议停止复投**');
-    kill.forEach((m) => lines.push(`· ${m.name} · 消耗 ${yuan(m.charge)} · 0 激活`));
+  const cpaAll = act > 0 ? total / act : null;
+  const poolAll = Object.values(planBudget).reduce((s, v) => s + Number(v || 0), 0);
+
+  // 昨日结论：成本差多少、量够不够
+  const gap = cpaAll != null ? cpaAll - CFG.bidYuan : null;
+  const noPlan = plans.length === 0 && total === 0;
+  const verdict = noPlan
+    ? '昨日没有任何投放记录（没有在跑的计划，或计划还没起量）'
+    : act === 0
+      ? `昨日 ${yuan(total)} 元零激活，先查回传与审核，别再盲目加量`
+      : gap != null && gap > 3
+        ? `昨日花 ${yuan(total)} 元拿到 ${act} 个激活，均价 ${yuan(cpaAll)}，比 ${CFG.bidYuan} 元目标高 ${yuan(gap)} —— 成本没守住`
+        : gap != null && gap > 0
+          ? `昨日均价 ${yuan(cpaAll)}，略高于 ${CFG.bidYuan} 元目标，在可接受边缘`
+          : `昨日均价 ${yuan(cpaAll)}，成本达标`;
+
+  const dailyTitle = metrics.length === 1 ? metrics[0].name || metrics[0].tag : '多账户';
+  const lines = [`### ${dailyTitle} · 日报 ${md(y)}`, `**结论**：${verdict}`, '', '---', ''];
+
+  // 账户
+  for (const m of metrics) lines.push(...accountBlock(m, planBudget[m.id] || 0, acctBudget[m.id] || 0));
+  if (metrics.length > 1) {
+    lines.push(`**合计**：消耗 ${yuan(total)} / 计划池 ${yuan(poolAll)}　激活 ${act}　均价 ${cpaAll == null ? '—' : yuan(cpaAll)}`);
   }
-  lines.push('', `**今日动作**：每户上 2 条计划 —— 跑量复投 8–10 条（可用上面名单，重复没关系）+ 新素材 3–5 条；版位只投上下滑大屏，出价 8 元（新素材执行器可提到 9）。`);
+
+  // 计划复盘
+  lines.push('');
+  if (plans.length) {
+    lines.push(`**昨日计划 · ${plans.length} 条**`);
+    lines.push(...planBlock([...plans].sort((a, b) => Number((b.row || {}).charge || 0) - Number((a.row || {}).charge || 0))));
+  } else {
+    lines.push('**昨日计划**：无投放记录');
+  }
+
+  // 素材
+  lines.push('', '---', '', '**素材 · 近 7 天**');
+  const topCpa = top.filter((m) => m.activation > 0).slice(0, 3);
+  if (topCpa.length) {
+    lines.push('· 跑量前 3：');
+    topCpa.forEach((m) => lines.push(`　${m.name}｜消耗 ${yuan(m.charge)}｜激活 ${m.activation}｜CPA ${yuan(m.cpa)}`));
+  } else {
+    lines.push('· 近 7 天没有带转化的素材');
+  }
+  lines.push(repool.length ? `· ✅ 可复投（CPA ≤ 11）：${repool.slice(0, 5).map((m) => `${m.name}（${yuan(m.cpa)}）`).join('、')}` : '· 暂无达标可复投素材，今天以测新为主');
+  if (kill.length) lines.push(`· ⛔ 建议停投（≥27 元 0 激活）：${kill.map((m) => `${m.name}（${yuan(m.charge)}）`).join('、')}`);
+
+  // 今日动作：结合账户是否最大转化
+  const mcbAccs = new Set();
+  for (const p of plans) if (p.brief.isMcb && Number((p.row || {}).charge || 0) > 0) mcbAccs.add(String(p.accId));
+  lines.push('', '---', '', '**今日动作**');
+  lines.push(
+    !plans.length
+      ? `1. 昨日无投放记录：今天先确认计划已开启、审核通过，等激活到 ${L.observeMaxAct} 再看成本`
+      : mcbAccs.size
+        ? '1. 计划是最大转化（无出价）：不要谈提价——要量就加计划预算或加素材，要控成本就压预算/关计划'
+        : `1. 计划是 oCPX：出价维持 ${CFG.bidYuan} 元，新素材最多上到 ${CFG.autoExecute.bidMax || 9} 元`,
+  );
+  lines.push(`2. 复投池里的素材各上 1 条新计划（同素材可重复），版位只投上下滑大屏`);
+  lines.push(`3. 新素材测 3~5 条，等激活 ≥${L.observeMaxAct} 再看成本，别中途频繁改`);
+
   // 效果台账：昨日/前日已执行动作的 24h 回看汇总
   try {
     const fx = autoEffects.recentLines(2);
     if (fx.length) {
       lines.push('', '---', '**近 2 日操作效果回看（24h 窗口，只摆事实）**');
-      fx.slice(0, 10).forEach((l) => lines.push(`· ${l}`));
+      fx.slice(0, 8).forEach((l) => lines.push(`· ${l}`));
     }
   } catch (e) {
     log(`效果台账读取失败：${e.message}`);
   }
+  lines.push('', `[打开工作台](http://127.0.0.1:7801)`);
   const dkey = MODE + '-' + ymd();
   if (state.sent[dkey]) { log(dkey + " 今日已推送过，跳过"); return; }
-  state.sent[dkey] = Date.now();
-  const card = lines.join('\n');
+  if (!DRY) state.sent[dkey] = Date.now();
+  const card = cardJoin(lines);
   const r = pushDingtalk(card);
   console.log(card);
   if (r.out) console.log('\n[dws] ' + r.out.replace(/\s+/g, ' ').slice(0, 300));
@@ -834,16 +1162,59 @@ async function daily() {
 async function eod() {
   const date = ymd();
   const metrics = await accountMetrics(date);
+  const names = await accountNameMap();
+  applyAccountNames(metrics, names);
+
+  const plans = [];
+  const planBudget = {};
+  const acctBudget = {};
+  for (const acc of CFG.accounts) {
+    acctBudget[acc.id] = await budgetOf(acc.id);
+    let rows = [];
+    try {
+      rows = await campaignRows(acc.id, date);
+    } catch (e) {
+      log(`日终计划数据拉取失败：${e.message}`);
+    }
+    const briefs = await loadCampaignBrief(acc.id, [...rows.map((r) => r.campaignId), ...(await recentCampaignIds(acc.id, 7))]);
+    let pool = 0;
+    for (const b of briefs.values()) if (b.dayBudgetYuan > 0) pool += b.dayBudgetYuan;
+    planBudget[acc.id] = pool;
+    const rowMap = new Map(rows.map((r) => [String(r.campaignId), r]));
+    for (const b of briefs.values()) plans.push({ accId: acc.id, brief: b, row: rowMap.get(b.id) || null });
+    for (const r of rows) {
+      if (briefs.has(String(r.campaignId)) || Number(r.charge || 0) <= 0) continue;
+      plans.push({
+        accId: acc.id,
+        row: r,
+        brief: { id: String(r.campaignId), name: `计划${String(r.campaignId).slice(-6)}`, putStatus: 1, putStatusText: '—', dayBudgetYuan: 0, bidYuan: 0, isMcb: false },
+      });
+    }
+  }
+
   const total = metrics.reduce((s, m) => s + (m.charge || 0), 0);
   const act = metrics.reduce((s, m) => s + (m.activation || 0), 0);
+  const cpaAll = act > 0 ? total / act : null;
+  const poolAll = Object.values(planBudget).reduce((s, v) => s + Number(v || 0), 0);
+  const used = poolAll > 0 ? (total / poolAll) * 100 : 0;
+
   const lines = [
-    `### 【快手日终】${md()} 小结`,
+    `### ${metrics.length === 1 ? metrics[0].name || metrics[0].tag : '多账户'} · 日终 ${md()}`,
+    cpaAll == null
+      ? `**结论**：今天花 ${yuan(total)} 元，零激活`
+      : `**结论**：今天花 ${yuan(total)} 元（计划池 ${used.toFixed(1)}%），${act} 个激活，均价 ${yuan(cpaAll)}`,
     '',
-    `合计消耗 ${yuan(total)} 元 · 激活 ${act} · 均价 ${act ? yuan(total / act) : '—'} · 总预算执行 ${((total / Number(CFG.totalBudgetYuan || CFG.dailyBudgetYuan * CFG.accounts.length)) * 100).toFixed(1)}%`,
+    '---',
+    '',
   ];
-  for (const m of metrics) lines.push(metricsLine(m));
-  lines.push('', '明日 09:30 出复盘与基建清单。');
-  const card = lines.join('\n');
+  for (const m of metrics) lines.push(...accountBlock(m, planBudget[m.id] || 0, acctBudget[m.id] || 0));
+  if (plans.length) {
+    lines.push('', `**计划 · ${plans.length} 条**`);
+    lines.push(...planBlock([...plans].sort((a, b) => Number((b.row || {}).charge || 0) - Number((a.row || {}).charge || 0))));
+  }
+  lines.push('', '明天 09:30 出复盘 + 今日安排。');
+  lines.push('', `[打开工作台](http://127.0.0.1:7801)`);
+  const card = cardJoin(lines);
   const r = pushDingtalk(card);
   console.log(card);
   if (r.out) console.log('\n[dws] ' + r.out.replace(/\s+/g, ' ').slice(0, 300));

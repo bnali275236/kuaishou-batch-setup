@@ -16,6 +16,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const effects = require('./auto-effects.cjs');
 const { ensureBackend } = require('./ensure-backend.cjs');
+const { planName } = require('./naming.cjs');
 
 const CFG = JSON.parse(fs.readFileSync(path.join(__dirname, 'monitor.config.json'), 'utf-8'));
 const DRY = process.argv.includes('--dry');
@@ -226,7 +227,9 @@ async function alreadyDone(name) {
     process.exit(0);
   }
 
-  const rows = usable.map((x, i) => buildRow(x.acc.id, x.acc.tag, i + 1, `PZ${x.acc.tag}-晚高峰-${suffix}`, today, 8, x.vids));
+  const rows = usable.map((x, i) =>
+    buildRow(x.acc.id, x.acc.tag, i + 1, planName({ tag: x.acc.tag, batch: '晚高峰', bidMode: 'OCPX', date: suffix }), today, 8, x.vids),
+  );
   for (const x of usable) {
     const r = rows.find((rr) => rr.advertiserId === x.acc.id);
     log(`${r.advertiserId} ${r.campaignName}：${x.vids.length} 条 / 出价 8`);

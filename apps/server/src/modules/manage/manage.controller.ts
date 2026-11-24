@@ -55,6 +55,38 @@ class UnitScheduleDto {
   scheduleTime!: string;
 }
 
+class CreativeCreateDto {
+  advertiserId!: string;
+  unitId!: string;
+  items!: Array<{
+    photoId: string;
+    name?: string;
+    description?: string;
+    actionBarText?: string;
+    clickTrackUrl?: string;
+    imageToken?: string;
+    fields?: Record<string, unknown>;
+  }>;
+}
+
+class UnitCreateDto {
+  advertiserId!: string;
+  campaignId!: string;
+  fields!: Record<string, unknown>;
+}
+
+class RenameDto {
+  advertiserId!: string;
+  @IsIn(['campaign', 'unit', 'creative'])
+  level!: 'campaign' | 'unit' | 'creative';
+  @IsString()
+  @IsNotEmpty()
+  id!: string;
+  @IsString()
+  @IsNotEmpty()
+  name!: string;
+}
+
 @Controller('api/manage')
 export class ManageController {
   constructor(private readonly manage: ManageService) {}
@@ -114,5 +146,23 @@ export class ManageController {
   @Post('unit-schedule')
   unitSchedule(@Body() body: UnitScheduleDto) {
     return this.manage.updateUnitSchedule(body.advertiserId, body.unitId, body.scheduleTime);
+  }
+
+  /** 往已存在的组里追加创意（每条创意一个视频素材），用于补未上过计划的素材 */
+  @Post('creative-create')
+  creativeCreate(@Body() body: CreativeCreateDto) {
+    return this.manage.createCreatives(body.advertiserId, body.unitId, body.items ?? []);
+  }
+
+  /** 在已有计划下新建广告组（字段从现有组克隆） */
+  @Post('unit-create')
+  unitCreate(@Body() body: UnitCreateDto) {
+    return this.manage.createUnit(body.advertiserId, body.campaignId, body.fields ?? {});
+  }
+
+  /** 改计划/组名称 */
+  @Post('rename')
+  rename(@Body() body: RenameDto) {
+    return this.manage.rename(body.advertiserId, body.level, body.id, body.name);
   }
 }

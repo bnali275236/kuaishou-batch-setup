@@ -400,9 +400,11 @@ function startServer() {
 /** 60 秒一次健康探测：进程活着但 HTTP 不通 → 判定卡死，杀掉让它重启 */
 function startSupervisor() {
   startServer();
+  startMonitorDaemon();
   if (healthTimer) clearInterval(healthTimer);
   healthTimer = setInterval(async () => {
     if (shuttingDown || starting) return;
+    startMonitorDaemon(); // 盯盘守护每 60s 顺带核活，死了就拉起来
     const code = await probe(6000);
     if (code === 200) {
       if (healthFails > 0) log(`健康探测恢复正常（HTTP 200）`);
@@ -419,6 +421,36 @@ function startSupervisor() {
   }, HEALTH_INTERVAL);
 }
 
+/* 盯盘守护：与后端同生命周期，1 小时一巡检推钉钉（monitor-daemon.cjs 自带单实例/心跳保护） */
+const MONITOR_DAEMON = path.join(__dirname, 'monitor-daemon.cjs');
+let daemonChild = null;
+function startMonitorDaemon() {
+  if (shuttingDown) return;
+  if (daemonChild && daemonChild.pid) {
+    try {
+      process.kill(daemonChild.pid, 0);
+      return; // 还活着
+    } catch {
+      daemonChild = null;
+    }
+  }
+  try {
+    daemonChild = spawn(process.execPath, [MONITOR_DAEMON], {
+      cwd: root,
+      env: process.env,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    daemonChild.on('error', (e) => log(`盯盘守护启动出错：${e && e.message}`));
+    daemonChild.on('exit', (code) => {
+      if (!shuttingDown) log(`盯盘守护退出（code=${code ?? 'null'}），60s 内自动拉起`);
+    });
+    log(`启动盯盘守护 pid=${daemonChild.pid}（整点巡检 → 钉钉「盼之电竞监控日报群」）`);
+  } catch (e) {
+    log(`盯盘守护启动失败：${e && e.message}`);
+  }
+}
+
 /* 关窗口 / Ctrl+C：先停子进程，不再重启 */
 function gracefulStop(sig) {
   if (shuttingDown) return;
@@ -427,6 +459,11 @@ function gracefulStop(sig) {
   if (healthTimer) clearInterval(healthTimer);
   try {
     if (child && child.pid) killTree(child.pid);
+  } catch {
+    /* ignore */
+  }
+  try {
+    if (daemonChild && daemonChild.pid) killTree(daemonChild.pid);
   } catch {
     /* ignore */
   }
