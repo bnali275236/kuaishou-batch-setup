@@ -1,6 +1,7 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { MAX_PAGE_SIZE, REALTIME_REPORT_LOOKBACK_DAYS } from '@wkbd/shared';
 import { AsyncReportService } from './async-report.service';
+import { AttrGroupBy, CreativeAttrsService } from './creative-attrs.service';
 import { ReportLevel, ReportService } from './report.service';
 
 class QueryReportDto {
@@ -39,6 +40,7 @@ export class ReportController {
   constructor(
     private readonly report: ReportService,
     private readonly asyncReport: AsyncReportService,
+    private readonly creativeAttrs: CreativeAttrsService,
   ) {}
 
   /**
@@ -79,6 +81,40 @@ export class ReportController {
   @Post('level/:level')
   query(@Param('level') level: ReportLevel, @Body() body: QueryReportDto) {
     return this.report.query(level, body);
+  }
+
+  /**
+   * 创意属性赛马（细则 1124）：把创意级报表按「广告语 / 标签组合 / 单标签 /
+   * 创意分类 / 行动号召」聚合，回答「哪句文案 / 哪组标签跑得好」。
+   * 首次调用会自动全量同步创意属性（1 小时缓存，sync=1 强制刷新）。
+   */
+  @Get('creative-attrs')
+  async creativeAttrsRank(
+    @Query('advertiserId') advertiserId: string,
+    @Query('startDate') startDate: string,
+    @Query('endDate') endDate: string,
+    @Query('groupBy') groupByRaw?: string,
+    @Query('sync') sync?: string,
+  ) {
+    const groupBy = (['description', 'plcDescription', 'category', 'tags', 'tag', 'actionBar'] as AttrGroupBy[]).includes(
+      groupByRaw as AttrGroupBy,
+    )
+      ? (groupByRaw as AttrGroupBy)
+      : 'tags';
+    const syncRes = await this.creativeAttrs.sync(String(advertiserId ?? ''), sync === '1');
+    const page = await this.report.query('creative', {
+      advertiserId: String(advertiserId ?? ''),
+      startDate,
+      endDate,
+      page: 1,
+      pageSize: MAX_PAGE_SIZE,
+    });
+    const ranked = await this.creativeAttrs.aggregate(
+      String(advertiserId ?? ''),
+      (page.rows ?? []) as unknown as Record<string, unknown>[],
+      groupBy,
+    );
+    return { groupBy, synced: syncRes, rows: ranked };
   }
 
   /** 手动触发历史回补（异步任务，每日配额 18 个账户） */

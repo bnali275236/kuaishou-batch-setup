@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { MAPI_PATHS, PLAN_PATHS, PUT_STATUS_CODE, yuanToLi } from '@wkbd/shared';
 import { MapiGateway } from '../../mapi/mapi.gateway';
 import { PrismaService } from '../../prisma/prisma.service';
+import { CreativeAttrsService } from '../report/creative-attrs.service';
 import { PlanApi, StatusUpdateResult } from '../plan/plan.api';
 
 /** 盯盘看板「进入账户」后的层级 */
@@ -63,6 +64,7 @@ export class ManageService {
     private readonly gateway: MapiGateway,
     private readonly planApi: PlanApi,
     private readonly prisma: PrismaService,
+    private readonly creativeAttrs: CreativeAttrsService,
   ) {}
 
   /**
@@ -271,11 +273,66 @@ export class ManageService {
           action: 'manage.creative.create',
         });
         out.push({ photoId: it.photoId, ok: true, creativeId: String(data?.creative_id ?? '') });
+        // 创意属性即建即存（平台 list 接口不回广告语/分类，赛马聚合靠本地这份）
+        if (data?.creative_id) {
+          await this.creativeAttrs
+            .upsertFromCreate(advertiserId, String(data.creative_id), {
+              creativeName: it.name,
+              unitId,
+              description: it.description,
+              tags: Array.isArray(it.fields?.creative_tag) ? (it.fields.creative_tag as string[]) : undefined,
+              categoryId: typeof it.fields?.creative_category === 'number' ? (it.fields.creative_category as number) : undefined,
+              actionBarText: it.actionBarText,
+            })
+            .catch(() => undefined); // 属性落库失败不影响创建结果
+        }
       } catch (e) {
         out.push({ photoId: it.photoId, ok: false, error: (e as Error).message.slice(0, 200) });
       }
     }
     return out;
+  }
+
+  /**
+   * 搜索广告组批量灌关键词（v2/word_info/create）。
+   *
+   * 平台约束：单次 ≤1000 个词、单词 ≤20 字；match_type 1 精确 / 2 短语 / 3 广泛。
+   * 返回平台 success_list / error_list 原样透传 —— 部分失败不会被瞒成成功。
+   */
+  async createWords(
+    advertiserId: string,
+    unitId: string,
+    words: Array<{ word: string; matchType?: number }>,
+  ): Promise<{ total: number; successCount: number; failed: Array<{ word: string; error?: string }> }> {
+    await this.assertWritable(advertiserId);
+    const clean = words
+      .map((w) => ({
+        word: String(w.word || '').trim().slice(0, 20),
+        match_type: Number(w.matchType) === 1 || Number(w.matchType) === 2 ? Number(w.matchType) : 3,
+      }))
+      .filter((w) => w.word);
+    if (!clean.length) throw new BadRequestException('关键词列表为空');
+    if (clean.length > 1000) throw new BadRequestException(`单次最多 1000 个关键词，当前 ${clean.length}`);
+    const data = await this.gateway.call<Record<string, unknown>>({
+      advertiserId,
+      path: MAPI_PATHS.WORD_INFO_CREATE,
+      body: {
+        advertiser_id: this.numericId(advertiserId),
+        unit_id: this.numericId(unitId),
+        word_infos: clean,
+      },
+      action: 'manage.word.create',
+    });
+    const successList = Array.isArray(data?.success_list) ? data.success_list : [];
+    const errorList = Array.isArray(data?.error_list) ? data.error_list : [];
+    return {
+      total: clean.length,
+      successCount: successList.length,
+      failed: errorList.map((w: Record<string, unknown>) => ({
+        word: String(w.word || ''),
+        error: String(w.error_reason || ''),
+      })),
+    };
   }
 
   /**

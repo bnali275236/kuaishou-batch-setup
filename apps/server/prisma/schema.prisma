@@ -407,3 +407,28 @@ model HotTopicItem {
   @@unique([platform, rank])
   @@index([platform])
 }
+
+/// 创意属性快照：广告语 / PLC 描述 / 创意分类 / 创意标签 / 行动号召。
+/// 平台报表没有这些维度，落本地后按属性 join 创意报表即可做「文案标签赛马」。
+model CreativeAttribute {
+  id             Int      @id @default(autoincrement())
+  advertiserId   String
+  creativeId     String
+  creativeName   String?
+  campaignId     String?
+  unitId         String?
+  /// 广告语（description）
+  description    String?
+  /// 原生 PLC 描述语
+  plcDescription String?
+  /// 创意分类名（creative_category → 叶子类目名）
+  categoryName   String?
+  /// 创意标签 JSON 数组
+  tagsJson       String?
+  /// 行动号召按钮（action_bar_text）
+  actionBarText  String?
+  updatedAt      DateTime @updatedAt
+
+  @@unique([advertiserId, creativeId])
+  @@index([advertiserId])
+}

@@ -75,6 +75,13 @@ class UnitCreateDto {
   fields!: Record<string, unknown>;
 }
 
+class WordCreateDto {
+  advertiserId!: string;
+  unitId!: string;
+  /** 关键词列表：word ≤20 字，matchType 1 精确 / 2 短语 / 3 广泛（缺省 3） */
+  words!: Array<{ word: string; matchType?: number }>;
+}
+
 class RenameDto {
   advertiserId!: string;
   @IsIn(['campaign', 'unit', 'creative'])
@@ -158,6 +165,12 @@ export class ManageController {
   @Post('unit-create')
   unitCreate(@Body() body: UnitCreateDto) {
     return this.manage.createUnit(body.advertiserId, body.campaignId, body.fields ?? {});
+  }
+
+  /** 搜索广告组批量灌关键词（v2/word_info/create，单次 ≤1000 词） */
+  @Post('word-create')
+  wordCreate(@Body() body: WordCreateDto) {
+    return this.manage.createWords(body.advertiserId, body.unitId, body.words ?? []);
   }
 
   /** 改计划/组名称 */

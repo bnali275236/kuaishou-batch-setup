@@ -70,21 +70,42 @@ function openBrowser(url) {
 }
 
 /**
- * 后台化启动：把「服务 + 守护」交给一个窗口不可见的 node 进程，本进程随即退出。
- * 原理：用 Windows PowerShell 的 Start-Process -WindowStyle Hidden 再起一份本脚本
- * （带 --hidden 标记），新进程的控制台窗口「创建即隐藏」，用户看不到黑框，
- * 服务照常在后台跑。不用 Add-Type / wscript，规避安全策略黑名单。
+ * 后台化启动：把「服务 + 守护」交给一个**不分配控制台**的 node 进程，本进程随即退出。
+ *
+ * 为什么不用 PowerShell Start-Process -WindowStyle Hidden（2026-11-24 改）：
+ *   Windows 11 默认终端若设为 Windows Terminal，「隐藏窗口」会被 WT 忽略——
+ *   新进程的控制台由 WT 接管并弹出一个空白标签页（曾经的黑框复现就是这个）。
+ *   改用 Node 的 spawn({ detached, windowsHide })：底层 CreateProcess 带
+ *   CREATE_NO_WINDOW，进程根本不会申请控制台，WT 也就无机可乘。
  */
 function relaunchHidden() {
-  const esc = (s) => String(s).replace(/'/g, "''");
-  const ps = `Start-Process -FilePath '${esc(process.execPath)}' -ArgumentList '${esc(__filename)}','--hidden' -WindowStyle Hidden`;
   try {
-    const r = spawnSync(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', ps],
-      { windowsHide: true, timeout: 30000, stdio: 'ignore', env: { ...process.env, KUAISHOU_HIDDEN: '1' } }
-    );
-    return r.status === 0;
+    const c = spawn(process.execPath, [__filename, '--hidden'], {
+      cwd: root,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      env: { ...process.env, KUAISHOU_HIDDEN: '1' },
+    });
+    c.on('error', () => {});
+    c.unref();
+    // 给子进程 1.2s 启动时间：若它立刻死掉（权限/路径问题），回退为当前窗口继续跑
+    const sleepSync = (ms) => {
+      try {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+      } catch {
+        /* ignore */
+      }
+    };
+    for (let i = 0; i < 8; i++) {
+      sleepSync(150);
+      try {
+        process.kill(c.pid, 0);
+      } catch {
+        return false;
+      }
+    }
+    return true;
   } catch {
     return false;
   }
@@ -176,22 +197,33 @@ function sleep(ms) {
 /* ---------------- 启动前：清理占用 ---------------- */
 
 async function takeOverPort() {
-  const code = await probe(1500);
-  const occupants = pidsOnPort(PORT);
-  if (!occupants.length) return true;
-
-  // 先看旧实例的 lock：如果主人还活着且服务健康，就不抢，
-  // 直接当作「服务已在运行」处理（调用方会打开浏览器后退出）。
+  // ── 单实例判定（2026-11-24 加固）──
+  // 旧逻辑只看「端口是否已监听」。但新实例可能在老实例「进程已起、服务还没就绪」的
+  // 几秒空窗内启动：此时端口没被监听 → 新实例也去拉一个守护 → 两个守护互抢 7801，
+  // 抢不到的那个每隔 60s 崩一次（launcher.log 里成片的「异常退出 code=1」）。
+  // 现在：只要 lock 里的守护进程还活着，就先等它把服务拉起来，绝不再起第二个。
   let lockPid = 0;
   try {
     lockPid = Number(fs.readFileSync(LOCK_FILE, 'utf-8').trim());
   } catch {
-    /* ignore */
+    /* 没有 lock = 无主 */
   }
-  if (lockPid && lockPid !== process.pid && isAlive(lockPid) && code === 200) {
-    log(`服务已在运行（进程 ${lockPid}），无需重复启动`);
-    return 'RUNNING';
+  if (lockPid && lockPid !== process.pid && isAlive(lockPid)) {
+    for (let i = 0; i < 40; i++) {
+      if ((await probe(1500)) === 200) {
+        log(`已有实例在管（进程 ${lockPid}），服务已就绪，本窗口直接退出`);
+        return 'RUNNING';
+      }
+      await sleep(1000);
+    }
+    log(`已有实例（进程 ${lockPid}）存活但 40s 内服务未就绪，判定僵死，接管`);
+    killTree(lockPid);
+    await sleep(1000);
   }
+
+  const code = await probe(1500);
+  const occupants = pidsOnPort(PORT);
+  if (!occupants.length) return true;
 
   // 先宣告接管（写 lock），再动别人的进程。
   // 旧实例的守护一旦发现 lock 不是自己，就会主动让位退出，不会来抢端口。
@@ -319,6 +351,7 @@ async function waitHealthyAndOpen() {
 }
 
 let child = null;
+let ioFds = null;
 let lastStart = 0;
 let crashCount = 0;
 let shuttingDown = false;
@@ -343,10 +376,39 @@ function startServer() {
   lastStart = Date.now();
   healthFails = 0;
 
+  // 后端输出写文件（隐藏运行后控制台不存在，日志必须落盘才查得到崩溃原因）
+  let io = 'ignore';
+  if (ioFds) {
+    for (const fd of ioFds) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* ignore */
+      }
+    }
+    ioFds = null;
+  }
+  try {
+    const outPath = path.join(RUNTIME, 'server.out.log');
+    const errPath = path.join(RUNTIME, 'server.err.log');
+    try {
+      if (fs.statSync(outPath).size > 5 * 1024 * 1024) fs.writeFileSync(outPath, '');
+      if (fs.statSync(errPath).size > 5 * 1024 * 1024) fs.writeFileSync(errPath, '');
+    } catch {
+      /* 文件不存在就等它创建 */
+    }
+    ioFds = [fs.openSync(outPath, 'a'), fs.openSync(errPath, 'a')];
+    io = ['ignore', ioFds[0], ioFds[1]];
+  } catch {
+    io = 'ignore';
+  }
+
   child = spawn(process.execPath, [serverEntry], {
     cwd: serverDir,
     env: process.env,
-    stdio: 'inherit',
+    stdio: io,
+    // CREATE_NO_WINDOW：后端也不申请控制台，否则 WT 默认终端下又会弹窗
+    windowsHide: true,
   });
   log(`启动后端 pid=${child.pid}`);
 

@@ -284,6 +284,39 @@ async function campaignRows(accId, dateStr) {
 const T = CFG.thresholds;
 const L = CFG.learning;
 
+/**
+ * 目标出价（预警基准）：细则 1124 —— 无成本考核，按出价预警。
+ * 付费(ocpx 190) → bidPayYuan(150)，激活 → bidYuan(15)；
+ * 非 MCB 计划有实际组出价时优先用组出价（更贴近考核口径）。
+ */
+function targetBidOf(brief = {}) {
+  const pay = Number(CFG.bidPayYuan || 150);
+  const act = Number(CFG.bidYuan || 15);
+  if (!brief.isMcb && Number(brief.bidYuan) > 0) return Number(brief.bidYuan);
+  return Number(brief.ocpxActionType) === 190 ? pay : act;
+}
+
+/** 阈值族 = 目标出价 × 倍数（倍数在 config.learning） */
+function costLines(brief = {}) {
+  const t = targetBidOf(brief);
+  return {
+    target: t,
+    warn: t * (L.warnX ?? 1),
+    red: t * (L.redX ?? 1.3),
+    rampWarn: t * (L.rampWarnX ?? 1.5),
+    rampHard: t * (L.rampHardX ?? 2),
+    rampHardMinCharge: t * (L.rampHardMinChargeX ?? 3),
+    redMinCharge: t * (L.redMinChargeX ?? 6),
+    empty: t * (L.emptyX ?? 3),
+  };
+}
+
+/** 账户级空耗线（整户 0 激活判定） */
+function accountEmptyLine(payGoal = false) {
+  const t = payGoal ? Number(CFG.bidPayYuan || 150) : Number(CFG.bidYuan || 15);
+  return t * (L.accountEmptyX ?? 4);
+}
+
 /** oCPX 学习期分级：靠累计激活数判断，不看挂了多少小时 */
 function stageOf(act) {
   if (act < L.observeMaxAct) return 'OBSERVE';
@@ -307,12 +340,13 @@ function evalCampaignCost(accName, row, name, brief = {}) {
   const cpa = act > 0 && row.activationCost != null ? Number(row.activationCost) : null;
   const cid = String(row.campaignId || '');
   const stage = stageOf(act);
+  const C = costLines(brief);
   // 最大转化计划没有出价，任何「调价」建议都不成立，只能动预算/素材/开关
   const priceHint = brief.isMcb ? '降预算 10%~20%' : '降出价 10%';
 
   // 空耗：任何阶段都判（不是成本问题，是完全不转化）
-  if (act === 0 && charge >= L.emptySpendCharge) {
-    out.push({ key: `P0-${cid}`, sev: 'YEL', code: 'P0', mcb: !!brief.isMcb, w: charge, text: `「${name}」消耗 ${yuan(charge)} 仍 0 激活 → 建议关停（${L.emptySpendCharge} 元空耗线）` });
+  if (act === 0 && charge >= C.empty) {
+    out.push({ key: `P0-${cid}`, sev: 'YEL', code: 'P0', mcb: !!brief.isMcb, w: charge, text: `「${name}」消耗 ${yuan(charge)} 仍 0 激活 → 建议关停（${yuan(C.empty)} 元空耗线）` });
     return out;
   }
   if (cpa == null) return out;
@@ -322,18 +356,18 @@ function evalCampaignCost(accName, row, name, brief = {}) {
     return out;
   }
   if (stage === 'RAMP') {
-    if (cpa > L.cpaRampHard && charge >= L.cpaRampHardMinCharge) {
-      out.push({ key: `P3-${cid}`, sev: 'YEL', code: 'P3', mcb: !!brief.isMcb, w: charge, text: `「${name}」爬坡期成本偏高：CPA ${yuan(cpa)} > ${L.cpaRampHard}（激活 ${act}/${L.rampMaxAct}）→ 再观察到 ${L.rampMaxAct} 个激活，暂不关停` });
-    } else if (cpa > L.cpaRampWarn) {
-      out.push({ key: `P2-${cid}`, sev: 'GOOD', code: 'P2', mcb: !!brief.isMcb, w: 0, text: `「${name}」爬坡期：CPA ${yuan(cpa)}（激活 ${act}），容忍线 ${L.cpaRampWarn}，继续观察` });
+    if (cpa > C.rampHard && charge >= C.rampHardMinCharge) {
+      out.push({ key: `P3-${cid}`, sev: 'YEL', code: 'P3', mcb: !!brief.isMcb, w: charge, text: `「${name}」爬坡期成本偏高：CPA ${yuan(cpa)} > ${yuan(C.rampHard)}（激活 ${act}/${L.rampMaxAct}）→ 再观察到 ${L.rampMaxAct} 个激活，暂不关停` });
+    } else if (cpa > C.rampWarn) {
+      out.push({ key: `P2-${cid}`, sev: 'GOOD', code: 'P2', mcb: !!brief.isMcb, w: 0, text: `「${name}」爬坡期：CPA ${yuan(cpa)}（激活 ${act}），容忍线 ${yuan(C.rampWarn)}，继续观察` });
     }
     return out;
   }
-  // 成熟期：恢复正常红线
-  if (cpa > L.cpaMatureRed && charge >= L.cpaMatureRedMinCharge) {
-    out.push({ key: `P5-${cid}`, sev: 'RED', code: 'P5', mcb: !!brief.isMcb, w: charge, text: `「${name}」成熟期成本超标：CPA ${yuan(cpa)} > ${L.cpaMatureRed}（激活 ${act}，消耗 ${yuan(charge)}）→ ${priceHint}，仍不达标就关停` });
-  } else if (cpa > L.cpaMatureWarn) {
-    out.push({ key: `P4-${cid}`, sev: 'YEL', code: 'P4', mcb: !!brief.isMcb, w: charge, text: `「${name}」成熟期成本偏高：CPA ${yuan(cpa)} > ${L.cpaMatureWarn}（激活 ${act}）→ ${priceHint}` });
+  // 成熟期：恢复正常红线（预警基准=出价本身，细则1124：暂无成本考核）
+  if (cpa > C.red && charge >= C.redMinCharge) {
+    out.push({ key: `P5-${cid}`, sev: 'RED', code: 'P5', mcb: !!brief.isMcb, w: charge, text: `「${name}」成本超红线：CPA ${yuan(cpa)} > ${yuan(C.red)}（出价 ${yuan(C.target)}，激活 ${act}）→ ${priceHint}，仍不达标就关停` });
+  } else if (cpa > C.warn) {
+    out.push({ key: `P4-${cid}`, sev: 'YEL', code: 'P4', mcb: !!brief.isMcb, w: charge, text: `「${name}」成本超预警：CPA ${yuan(cpa)} ≥ 出价 ${yuan(C.target)}（激活 ${act}）→ ${priceHint}` });
   }
   return out;
 }
@@ -358,13 +392,15 @@ function evalAccount(a, budgetYuan, hour, pace, opts = {}) {
   } else {
     delete state.firstSeen[`A5-${a.id}`];
   }
-  // A4 账户级空耗（整户 60 元仍 0 激活才算异常）
-  if (a.charge >= L.accountEmptySpendCharge && a.activation === 0) {
+  // A4 账户级空耗（整户消耗达到空耗线仍 0 激活才算异常；线 = 目标出价 × accountEmptyX）
+  const acctEmpty = accountEmptyLine(!!opts.payGoal);
+  if (a.charge >= acctEmpty && a.activation === 0) {
     alerts.push({ key: `A4-${a.id}`, sev: 'RED', code: 'A4', mcb, text: `全户空耗：消耗 ${yuan(a.charge)} 元仍 0 激活` });
   }
   // A3 账户级成本：只做提示，真正的判定在计划级别（账户里混着老计划，不能一刀切）
-  if (stageOf(a.activation) !== 'OBSERVE' && a.cpa != null && a.cpa > L.cpaMatureWarn) {
-    alerts.push({ key: `A3-${a.id}`, sev: 'YEL', code: 'A3', mcb, text: `账户综合 CPA ${yuan(a.cpa)}（激活 ${a.activation}）——仅提示，成本判定看计划级` });
+  const acctWarn = Number(opts.payGoal ? CFG.bidPayYuan || 150 : CFG.bidYuan || 15);
+  if (stageOf(a.activation) !== 'OBSERVE' && a.cpa != null && a.cpa > acctWarn) {
+    alerts.push({ key: `A3-${a.id}`, sev: 'YEL', code: 'A3', mcb, text: `账户综合 CPA ${yuan(a.cpa)} ≥ 出价预警线 ${yuan(acctWarn)}（激活 ${a.activation}）——仅提示，成本判定看计划级` });
   }
   // A1 / A2 消耗进度（账户没跑起来时不算「滞后」，单列 A1b）
   if (hour >= 12) {
@@ -473,11 +509,12 @@ function evalCreatives(accName, rows, nameMap, campMap = new Map()) {
     const ctr = r.actionRatio != null ? Number(r.actionRatio) : null;
     const brief = campMap.get(String(r.campaignId || '')) || {};
     const mcb = !!brief.isMcb;
+    const C = costLines(brief);
 
-    if (charge >= L.emptySpendCharge && act === 0) {
+    if (charge >= C.empty && act === 0) {
       alerts.push({ key: `C1-${cid}`, sev: 'YEL', code: 'C1', mcb, w: charge, text: `「${name}」消耗 ${yuan(charge)} 仍 0 激活 → 关掉这条创意` });
-    } else if (charge >= L.emptySpendCharge && cpa != null && cpa > L.cpaRampHard) {
-      alerts.push({ key: `C2-${cid}`, sev: 'YEL', code: 'C2', mcb, w: charge, text: `「${name}」消耗 ${yuan(charge)}，CPA ${yuan(cpa)} 超爬坡容忍线 → 关掉这条创意` });
+    } else if (charge >= C.empty && cpa != null && cpa > C.rampHard) {
+      alerts.push({ key: `C2-${cid}`, sev: 'YEL', code: 'C2', mcb, w: charge, text: `「${name}」消耗 ${yuan(charge)}，CPA ${yuan(cpa)} 超爬坡容忍线 ${yuan(C.rampHard)} → 关掉这条创意` });
     }
     // 曝光不足：只在「已经在花钱却拿不到量」时才算问题，避免历史死创意刷屏
     if (hour >= T.c3MinHour && charge >= 3 && show > 0 && show < T.c3MinShow) {
@@ -487,8 +524,8 @@ function evalCreatives(accName, rows, nameMap, campMap = new Map()) {
     if (show >= T.c4MinShow && ctr != null && ctr < T.c4MaxCtr) {
       alerts.push({ key: `C4-${cid}`, sev: 'YEL', code: 'C4', mcb, w: charge, text: `「${name}」点击率 ${pct(ctr)} < ${pct(T.c4MaxCtr)} → 素材钩子弱，进淘汰池` });
     }
-    if (act >= T.c5MinAct && cpa != null && cpa <= T.c5MaxCpa) {
-      alerts.push({ key: `C5-${cid}`, sev: 'GOOD', code: 'C5', mcb, w: 0, text: `「${name}」高潜：CPA ${yuan(cpa)}（激活 ${act}）→ 值得复投放大` });
+    if (act >= T.c5MinAct && cpa != null && cpa <= C.target) {
+      alerts.push({ key: `C5-${cid}`, sev: 'GOOD', code: 'C5', mcb, w: 0, text: `「${name}」高潜：CPA ${yuan(cpa)} ≤ 出价 ${yuan(C.target)}（激活 ${act}）→ 值得复投放大` });
     }
   }
   return alerts;
@@ -503,7 +540,7 @@ function actionOf(a) {
   switch (a.code) {
     case 'A0': return '先确认后端 7801 在线、授权未失效';
     case 'A1': return mcb ? '最大转化不看出价：查审核与素材质量；要抢量只能加计划预算或换素材' : '新素材出价可提到 9 元（上限），复投保持 8';
-    case 'A2': return mcb ? '消耗偏快：盯住 CPA，超线就下调计划预算' : '降出价（基准 8 元）或关停 CPA 最差的创意';
+    case 'A2': return mcb ? '消耗偏快：盯住 CPA，超线就下调计划预算' : '降出价（回到出价基准）或关停 CPA 最差的创意';
     case 'A3': return '账户综合成本只作参考，结论看计划级';
     case 'A4': return '整户 0 激活：先查监测链接回传，再查落地页';
     case 'A5': return '核 channel_tag 与回调签名，先排除回传问题';
@@ -517,19 +554,20 @@ function actionOf(a) {
     case 'P5': return mcb ? '成本超红线：计划预算降 20%，仍不达标就关停' : '成本超红线：出价降 10%，仍不达标就关停';
     case 'C1': return '关掉这条创意（0 激活空耗）';
     case 'C2': return '关掉这条创意（CPA 超爬坡容忍线）';
-    case 'C3': return mcb ? '最大转化无出价：换封面 / 前 3 秒，或直接换素材' : '提价 20% 抢量，跑起来后回调 8 元';
+    case 'C3': return mcb ? '最大转化无出价：换封面 / 前 3 秒，或直接换素材' : '提价 20% 抢量，跑起来后回调出价基准';
     case 'C4': return '进淘汰池不再复投；同素材换钩子再试';
     case 'C5': return '复投放大，主力吃量';
     default: return null;
   }
 }
 
-/** 计划所处阶段（按激活数，不看挂了多久） */
-function stageText(act, charge) {
+/** 计划所处阶段（按激活数，不看挂了多久；阈值随目标出价动态） */
+function stageText(act, charge, brief = {}) {
+  const C = costLines(brief);
   if (!act && !charge) return '还没起量（无消耗）';
   if (act < L.observeMaxAct) return `学习期：激活 ${act}/${L.observeMaxAct} → 成本暂不判定`;
-  if (act < L.rampMaxAct) return `爬坡期：激活 ${act}/${L.rampMaxAct} → 容忍 CPA ${L.cpaRampWarn}~${L.cpaRampHard}`;
-  return `成熟期：激活 ${act} → 红线 CPA ${L.cpaMatureWarn}/${L.cpaMatureRed}`;
+  if (act < L.rampMaxAct) return `爬坡期：激活 ${act}/${L.rampMaxAct} → 容忍 CPA ${yuan(C.rampWarn)}~${yuan(C.rampHard)}`;
+  return `成熟期：激活 ${act} → 预警/红线 CPA ${yuan(C.warn)}/${yuan(C.red)}（出价 ${yuan(C.target)}）`;
 }
 
 function planBlock(plans) {
@@ -545,7 +583,7 @@ function planBlock(plans) {
     out.push(
       `　${b.putStatusText}｜${mode}｜日预算 ${b.dayBudgetYuan ? Math.round(b.dayBudgetYuan) + ' 元' : '不限'}｜消耗 ${yuan(charge)}｜激活 ${act}｜CPA ${cpa == null ? '—' : yuan(cpa)}｜展示 ${Number(row.show || 0)}｜CTR ${pct(row.actionRatio)}`,
     );
-    out.push(`　${stageText(act, charge)}`);
+    out.push(`　${stageText(act, charge, b)}`);
   });
   return out;
 }
@@ -1080,18 +1118,35 @@ async function daily() {
   const cpaAll = act > 0 ? total / act : null;
   const poolAll = Object.values(planBudget).reduce((s, v) => s + Number(v || 0), 0);
 
-  // 昨日结论：成本差多少、量够不够
-  const gap = cpaAll != null ? cpaAll - CFG.bidYuan : null;
+  // 昨日结论：按转化目标分开算均价（激活 vs 出价 15，付费 vs 出价 150），无成本考核不下「没守住」的结论
+  const actLines = plans.filter((p) => Number((p.brief || {}).ocpxActionType) !== 190);
+  const payLines = plans.filter((p) => Number((p.brief || {}).ocpxActionType) === 190);
+  const sumOf = (arr, k1, k2) =>
+    arr.reduce(
+      (s, p) => ({ charge: s.charge + Number((p.row || {})[k1] || 0), cv: s.cv + Number((p.row || {})[k2] || 0) }),
+      { charge: 0, cv: 0 },
+    );
+  const actAgg = sumOf(actLines, 'charge', 'activation');
+  const payAgg = sumOf(payLines, 'charge', 'payCount');
+  const actBid = Number(CFG.bidYuan || 15);
+  const payBid = Number(CFG.bidPayYuan || 150);
+  const seg = [];
+  if (actAgg.cv > 0) {
+    const cpa = actAgg.charge / actAgg.cv;
+    seg.push(`激活 ${actAgg.cv} 个均价 ${yuan(cpa)}（出价线 ${actBid}）`);
+  }
+  if (payAgg.cv > 0) {
+    const cpa = payAgg.charge / payAgg.cv;
+    seg.push(`付费 ${payAgg.cv} 次均价 ${yuan(cpa)}（出价线 ${payBid}）`);
+  }
   const noPlan = plans.length === 0 && total === 0;
   const verdict = noPlan
     ? '昨日没有任何投放记录（没有在跑的计划，或计划还没起量）'
     : act === 0
       ? `昨日 ${yuan(total)} 元零激活，先查回传与审核，别再盲目加量`
-      : gap != null && gap > 3
-        ? `昨日花 ${yuan(total)} 元拿到 ${act} 个激活，均价 ${yuan(cpaAll)}，比 ${CFG.bidYuan} 元目标高 ${yuan(gap)} —— 成本没守住`
-        : gap != null && gap > 0
-          ? `昨日均价 ${yuan(cpaAll)}，略高于 ${CFG.bidYuan} 元目标，在可接受边缘`
-          : `昨日均价 ${yuan(cpaAll)}，成本达标`;
+      : seg.length
+        ? `昨日花 ${yuan(total)} 元：${seg.join('；')} —— ${seg.some((s) => true) ? '对照出价线自行判断，暂无成本考核' : ''}`
+        : `昨日花 ${yuan(total)} 元拿到 ${act} 个激活，均价 ${act ? yuan(total / act) : '—'}`;
 
   const dailyTitle = metrics.length === 1 ? metrics[0].name || metrics[0].tag : '多账户';
   const lines = [`### ${dailyTitle} · 日报 ${md(y)}`, `**结论**：${verdict}`, '', '---', ''];
@@ -1132,7 +1187,7 @@ async function daily() {
       ? `1. 昨日无投放记录：今天先确认计划已开启、审核通过，等激活到 ${L.observeMaxAct} 再看成本`
       : mcbAccs.size
         ? '1. 计划是最大转化（无出价）：不要谈提价——要量就加计划预算或加素材，要控成本就压预算/关计划'
-        : `1. 计划是 oCPX：出价维持 ${CFG.bidYuan} 元，新素材最多上到 ${CFG.autoExecute.bidMax || 9} 元`,
+        : `1. 计划是 oCPX：出价按出价基准执行（激活 ${CFG.bidYuan} / 付费 ${CFG.bidPayYuan}），暂无成本考核，跑量优先`,
   );
   lines.push(`2. 复投池里的素材各上 1 条新计划（同素材可重复），版位只投上下滑大屏`);
   lines.push(`3. 新素材测 3~5 条，等激活 ≥${L.observeMaxAct} 再看成本，别中途频繁改`);

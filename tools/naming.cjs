@@ -21,8 +21,43 @@ const DELIVERY = {
   /** 常规广告（站内信息流，版位 [6] 上下滑大屏） */
   NORMAL: '常规',
   /** UAX 自动搭建（auto_build=1） */
-  UAX: 'UAX',
+  UAX: '全自动',
+  /** 人群包定向计划（target.population，一包一计划） */
+  POP: '人群包',
+  /** 低成本素材复投（赛马优选出的素材） */
+  REUSE: '低成本复投',
+  /** 周期稳投（periodic_delivery_type=1，需账户加白） */
+  PERIODIC: '周期稳投',
 };
+
+/**
+ * 组数反推（细则 1124：每组固定 5 条素材，1 计划 + 多组）。
+ * @param {number} materialCount 参赛素材条数
+ * @returns {number} 需要的组数（向上取整）
+ */
+function unitCount(materialCount) {
+  return Math.max(1, Math.ceil(Number(materialCount || 0) / 5));
+}
+
+/**
+ * 把素材按每组 5 条切分组（建任务用：1 计划 + N 组）。
+ * @param {string} base 计划名
+ * @param {Array} materials 素材列表（photoId+name）
+ * @returns {Array<{unitIndex:number, unitName:string, materials:Array}>}
+ */
+function splitUnits(base, materials) {
+  const list = Array.isArray(materials) ? materials : [];
+  const n = unitCount(list.length);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    out.push({
+      unitIndex: i,
+      unitName: unitName(base, i),
+      materials: list.slice(i * 5, i * 5 + 5),
+    });
+  }
+  return out;
+}
 
 /** 转化目标：ocpx_action_type → 名称 */
 const ACTION = {
@@ -39,7 +74,7 @@ const ACTION = {
  * @param {string|number} o.tag     户号尾号（386 / 387 / 618）
  * @param {string} o.batch          素材批次：新素材 / 跑量复投 / 晚高峰
  * @param {'MCB'|'OCPX'} [o.bidMode] 出价方式，默认 MCB
- * @param {'NORMAL'|'UAX'} [o.delivery] 投放类型，默认 NORMAL
+ * @param {'NORMAL'|'UAX'|'POP'|'REUSE'|'PERIODIC'} [o.delivery] 投放类型/测试项目，默认 NORMAL
  * @param {number|string} [o.action] 转化目标（ocpx_action_type 或中文），默认 180 激活
  * @param {string} o.date           日期戳 MMDD
  */
@@ -72,4 +107,4 @@ function creativeName(materialName) {
     .trim();
 }
 
-module.exports = { planName, unitName, creativeName, BID_MODE, DELIVERY, ACTION };
+module.exports = { planName, unitName, creativeName, unitCount, splitUnits, BID_MODE, DELIVERY, ACTION };
